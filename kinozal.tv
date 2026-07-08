@@ -1,0 +1,425 @@
+// ==UserScript==
+// @name         Kinozal.tv to Torrent Upload
+// @namespace    http://tampermonkey.net/
+// @version      1.8
+// @description  Добавляет кнопку для отправки торрент-файла на локальный сервер
+// @author       You
+// @match        https://kinozal.tv/details.php?id=*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_download
+// @connect      192.168.1.133
+// @connect      dl.kinozal.tv
+// @connect      kinozal.tv
+// @connect      i4.imageban.ru
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    console.log('=== Скрипт Kinozal.tv Uploader запущен ===');
+
+    // Функция для получения ID раздачи из URL
+    function getTorrentId() {
+        const urlParams = new URLSearchParams(window.location.search);
+        return urlParams.get('id');
+    }
+
+    // Функция для получения заголовка раздачи
+    function getTorrentTitle() {
+        // 1. Пробуем получить из og:title
+        const ogTitle = document.querySelector('meta[property="og:title"]');
+        if (ogTitle) {
+            const title = ogTitle.getAttribute('content');
+            if (title) {
+                console.log('✅ Title из og:title:', title);
+                return title;
+            }
+        }
+
+        // 2. Пробуем получить из schema.org Product
+        const productName = document.querySelector('[itemprop="name"]');
+        if (productName) {
+            const title = productName.getAttribute('content');
+            if (title) {
+                console.log('✅ Title из schema.org Product:', title);
+                return title;
+            }
+        }
+
+        // 3. Пробуем получить из h1
+        const h1Title = document.querySelector('h1 a.r1, h1 a.r0');
+        if (h1Title) {
+            const title = h1Title.textContent.trim();
+            if (title) {
+                console.log('✅ Title из h1:', title);
+                return title;
+            }
+        }
+
+        // 4. Пробуем получить из title страницы
+        const pageTitle = document.querySelector('title');
+        if (pageTitle) {
+            let title = pageTitle.textContent.trim();
+            title = title.replace(/:: Кинозал\.ТВ$/, '').trim();
+            if (title) {
+                console.log('✅ Title из title страницы:', title);
+                return title;
+            }
+        }
+
+        console.log('❌ Title не найден');
+        return '';
+    }
+
+    // Функция для получения URL постера
+    function getPosterUrl() {
+        // 1. Пробуем получить из og:image
+        const ogImage = document.querySelector('meta[property="og:image"]');
+        if (ogImage) {
+            let url = ogImage.getAttribute('content');
+            if (url) {
+                if (url.startsWith('/')) {
+                    url = 'https://kinozal.tv' + url;
+                    console.log('✅ Постер из og:image (относительный):', url);
+                    return url;
+                }
+                if (url.startsWith('http')) {
+                    console.log('✅ Постер из og:image (абсолютный):', url);
+                    return url;
+                }
+            }
+        }
+
+        // 2. Ищем изображение в меню раздачи
+        const menuImage = document.querySelector('.mn1_menu .p200');
+        if (menuImage) {
+            let src = menuImage.src;
+            if (src) {
+                if (src.startsWith('/')) {
+                    src = 'https://kinozal.tv' + src;
+                    console.log('✅ Постер из меню (относительный):', src);
+                    return src;
+                }
+                if (src.startsWith('http')) {
+                    console.log('✅ Постер из меню (абсолютный):', src);
+                    return src;
+                }
+            }
+        }
+
+        // 3. Ищем другие изображения постера
+        const posterImg = document.querySelector('img[src*="/i/poster/"]');
+        if (posterImg) {
+            let src = posterImg.src;
+            if (src) {
+                if (src.startsWith('/')) {
+                    src = 'https://kinozal.tv' + src;
+                    console.log('✅ Постер найден по пути /i/poster/:', src);
+                    return src;
+                }
+                if (src.startsWith('http')) {
+                    console.log('✅ Постер найден по пути /i/poster/ (абсолютный):', src);
+                    return src;
+                }
+            }
+        }
+
+        console.log('❌ Постер не найден');
+        return '';
+    }
+
+    // Функция для получения URL скачивания торрента
+    function getDownloadUrl() {
+        const downloadLink = document.querySelector('a[href*="dl.kinozal.tv/download.php"]');
+        if (downloadLink) {
+            return downloadLink.href;
+        }
+        return null;
+    }
+
+    // Функция для скачивания торрента через GM_xmlhttpRequest
+    function downloadTorrentGM(url) {
+        return new Promise((resolve, reject) => {
+            console.log('📥 Скачивание торрента с URL:', url);
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                responseType: 'blob',
+                onload: function(response) {
+                    console.log('📥 Ответ получен, статус:', response.status);
+                    if (response.status === 200) {
+                        console.log('📥 Торрент скачан, размер:', response.response.size, 'байт');
+                        resolve(response.response);
+                    } else {
+                        reject(new Error(`HTTP ${response.status}: ${response.statusText}`));
+                    }
+                },
+                onerror: function(error) {
+                    console.error('❌ Ошибка при скачивании торрента:', error);
+                    reject(new Error('Ошибка сети при скачивании торрента'));
+                },
+                ontimeout: function() {
+                    reject(new Error('Таймаут при скачивании торрента'));
+                },
+                timeout: 30000
+            });
+        });
+    }
+
+    // Функция для отправки торрента на сервер
+    function uploadTorrent(blob, torrentName, title, posterUrl) {
+        return new Promise((resolve, reject) => {
+            const formData = new FormData();
+            formData.append('file', blob, torrentName);
+            formData.append('save', 'true');
+            if (title) {
+                formData.append('title', title);
+            }
+            if (posterUrl) {
+                formData.append('poster', posterUrl);
+            }
+
+            console.log('📤 ОТПРАВКА ЗАПРОСА:');
+            console.log('📤 URL:', 'http://192.168.1.133:8090/torrent/upload');
+            console.log('📤 Метод: POST');
+            console.log('📤 Параметры формы:');
+            console.log('  file:', torrentName, `(${blob.size} байт)`);
+            console.log('  save: true');
+            console.log('  title:', title || '(пусто)');
+            console.log('  poster:', posterUrl || '(пусто)');
+
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: 'http://192.168.1.133:8090/torrent/upload',
+                headers: {
+                    'Accept': 'application/json'
+                },
+                data: formData,
+                onload: function(response) {
+                    console.log('📥 ОТВЕТ СЕРВЕРА:');
+                    console.log('📥 Статус:', response.status);
+                    console.log('📥 Тело ответа:', response.responseText);
+
+                    if (response.status === 200 || response.status === 201) {
+                        try {
+                            const jsonResponse = JSON.parse(response.responseText);
+                            console.log('✅ Ответ сервера (JSON):', jsonResponse);
+                            resolve(jsonResponse);
+                        } catch (e) {
+                            console.log('✅ Ответ сервера (текст):', response.responseText);
+                            resolve(response.responseText);
+                        }
+                    } else {
+                        reject(new Error(`HTTP ${response.status}: ${response.statusText}`));
+                    }
+                },
+                onerror: function(error) {
+                    console.error('❌ Ошибка отправки на сервер:', error);
+                    reject(new Error('Ошибка сети при отправке на сервер'));
+                },
+                ontimeout: function() {
+                    reject(new Error('Таймаут при отправке на сервер'));
+                },
+                timeout: 30000
+            });
+        });
+    }
+
+    // Основная функция
+    function addUploadButton() {
+        console.log('🔍 Поиск контейнера с кнопкой скачивания...');
+
+        const downloadTable = document.querySelector('table.w100p');
+        if (!downloadTable) {
+            console.log('❌ Таблица с кнопкой скачивания не найдена');
+            return;
+        }
+
+        const downloadCell = downloadTable.querySelector('td.nw');
+        if (!downloadCell) {
+            console.log('❌ Ячейка с кнопкой скачивания не найдена');
+            return;
+        }
+
+        const originalLink = downloadCell.querySelector('a[href*="dl.kinozal.tv/download.php"]');
+        if (!originalLink) {
+            console.log('❌ Ссылка скачивания не найдена');
+            return;
+        }
+
+        if (document.getElementById('torrent-upload-container')) {
+            console.log('⚠️ Кнопка уже существует');
+            return;
+        }
+
+        const torrentId = getTorrentId();
+        const torrentTitle = getTorrentTitle();
+        const posterUrl = getPosterUrl();
+        const downloadUrl = getDownloadUrl();
+
+        console.log('📋 Данные раздачи:');
+        console.log('  ID:', torrentId);
+        console.log('  Title:', torrentTitle || '(пусто)');
+        console.log('  Poster URL:', posterUrl || '(пусто)');
+        console.log('  Download URL:', downloadUrl);
+
+        if (!torrentId || !downloadUrl) {
+            console.log('❌ Не удалось получить ID раздачи или URL скачивания');
+            return;
+        }
+
+        // Создаем контейнер для кнопки
+        const buttonContainer = document.createElement('div');
+        buttonContainer.id = 'torrent-upload-container';
+        buttonContainer.style.cssText = 'margin-top: 10px; text-align: center;';
+
+         // Создаем ссылку-кнопку, точно как оригинальная
+        const uploadLink = document.createElement('a');
+        uploadLink.id = 'torrent-upload-button';
+        uploadLink.href = '#';
+        uploadLink.style.cssText = `
+            display: inline-block;
+            background: #4CAF50;
+            color: #fff;
+            font-size: 13px;
+            font-weight: bold;
+            padding: 4px 12px;
+            border-radius: 3px;
+            text-decoration: none;
+            cursor: pointer;
+            border: 1px solid #45a049;
+            text-align: center;
+            width: 200px;
+            box-sizing: border-box;
+            transition: all 0.2s ease;
+            line-height: 25px;
+            height: 25px;
+        `;
+        uploadLink.textContent = '📤 Отправить на сервер';
+
+        // Ховер эффект как у оригинальной кнопки
+        uploadLink.onmouseover = function() {
+            this.style.background = '#45a049';
+            this.style.borderColor = '#3d8b40';
+        };
+        uploadLink.onmouseout = function() {
+            this.style.background = '#4CAF50';
+            this.style.borderColor = '#45a049';
+        };
+
+        // Создаем элемент для статуса
+        const statusDiv = document.createElement('div');
+        statusDiv.id = 'torrent-upload-status';
+        statusDiv.style.cssText = `
+            margin-top: 8px;
+            font-size: 12px;
+            color: #333;
+            display: none;
+            padding: 4px 8px;
+            border-radius: 3px;
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            max-width: 200px;
+            margin-left: auto;
+            margin-right: auto;
+            word-wrap: break-word;
+        `;
+
+        buttonContainer.appendChild(uploadLink);
+        buttonContainer.appendChild(statusDiv);
+
+        // Вставляем после оригинальной ссылки
+        originalLink.parentElement.insertBefore(buttonContainer, originalLink.nextSibling);
+
+        console.log('✅ Кнопка добавлена');
+
+        // Обработчик клика
+        uploadLink.addEventListener('click', async function(e) {
+            e.preventDefault();
+
+            const statusDiv = document.getElementById('torrent-upload-status');
+            statusDiv.style.display = 'block';
+            statusDiv.innerHTML = '⏳ Скачивание торрента...';
+            statusDiv.style.background = '#fff3cd';
+            statusDiv.style.borderColor = '#ffc107';
+
+            uploadLink.textContent = '⏳ Загрузка...';
+            uploadLink.style.opacity = '0.7';
+            uploadLink.style.cursor = 'wait';
+            uploadLink.onmouseover = null;
+            uploadLink.onmouseout = null;
+
+            try {
+                // Скачиваем торрент
+                const blob = await downloadTorrentGM(downloadUrl);
+                console.log('✅ Торрент успешно скачан, размер:', blob.size);
+
+                statusDiv.innerHTML = '⏳ Отправка на сервер...';
+                statusDiv.style.background = '#cce5ff';
+                statusDiv.style.borderColor = '#b8daff';
+
+                const torrentName = `[kinozal.tv]id${torrentId}.torrent`;
+
+                // Отправляем на сервер
+                const result = await uploadTorrent(blob, torrentName, torrentTitle, posterUrl);
+
+                statusDiv.innerHTML = '✅ Торрент успешно отправлен!';
+                statusDiv.style.background = '#d4edda';
+                statusDiv.style.borderColor = '#c3e6cb';
+                statusDiv.style.color = 'green';
+
+                console.log('✅ Торрент успешно отправлен!', result);
+
+            } catch (error) {
+                console.error('❌ Ошибка:', error);
+                statusDiv.innerHTML = `❌ ${error.message || 'Неизвестная ошибка'}`;
+                statusDiv.style.background = '#f8d7da';
+                statusDiv.style.borderColor = '#f5c6cb';
+                statusDiv.style.color = 'red';
+            } finally {
+                uploadLink.textContent = '📤 Отправить на сервер';
+                uploadLink.style.opacity = '1';
+                uploadLink.style.cursor = 'pointer';
+                uploadLink.onmouseover = function() {
+                    this.style.background = '#45a049';
+                    this.style.borderColor = '#3d8b40';
+                };
+                uploadLink.onmouseout = function() {
+                    this.style.background = '#4CAF50';
+                    this.style.borderColor = '#45a049';
+                };
+
+                setTimeout(() => {
+                    statusDiv.style.opacity = '0';
+                    setTimeout(() => {
+                        statusDiv.style.display = 'none';
+                        statusDiv.style.opacity = '1';
+                    }, 500);
+                }, 5000);
+            }
+        });
+    }
+
+    // Инициализация
+    function init() {
+        console.log('🚀 Инициализация скрипта...');
+        setTimeout(addUploadButton, 1500);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    const observer = new MutationObserver(function(mutations) {
+        if (!document.getElementById('torrent-upload-container')) {
+            console.log('🔄 Кнопка не найдена, пробуем добавить...');
+            addUploadButton();
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+})();
