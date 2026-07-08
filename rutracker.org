@@ -1,0 +1,345 @@
+// ==UserScript==
+// @name         RuTracker.org to Torrent Upload
+// @namespace    http://tampermonkey.net/
+// @version      1.01
+// @description  Добавляет кнопку для отправки торрент-файла на локальный сервер
+// @author       You
+// @match        https://rutracker.org/forum/viewtopic.php?t=*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_download
+// @connect      192.168.1.133
+// @connect      rutracker.org
+// @connect      static.rutracker.cc
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    console.log('=== Скрипт RuTracker.org Uploader запущен ===');
+
+    // Функция для получения ID раздачи из URL
+    function getTorrentId() {
+        const urlParams = new URLSearchParams(window.location.search);
+        return urlParams.get('t');
+    }
+
+    // Функция для получения заголовка раздачи
+    function getTorrentTitle() {
+        // 1. Пробуем получить из title
+        const pageTitle = document.querySelector('title');
+        if (pageTitle) {
+            let title = pageTitle.textContent.trim();
+            // Убираем " :: RuTracker.org" из конца
+            title = title.replace(/:: RuTracker\.org$/, '').trim();
+            if (title) {
+                console.log('✅ Title из title страницы:', title);
+                return title;
+            }
+        }
+
+        // 2. Пробуем получить из h1
+        const h1Title = document.querySelector('#topic-title');
+        if (h1Title) {
+            const title = h1Title.textContent.trim();
+            if (title) {
+                console.log('✅ Title из h1:', title);
+                return title;
+            }
+        }
+
+        console.log('❌ Title не найден');
+        return '';
+    }
+
+    // Функция для получения URL постера
+    function getPosterUrl() {
+        // Ищем изображение в сообщении
+        const posterImg = document.querySelector('.post_body img[src*="fastpic"], .post_body img[src*="imageban"]');
+        if (posterImg) {
+            let src = posterImg.src;
+            // Если это превью, пытаемся получить полное изображение
+            if (src.includes('/thumb/')) {
+                src = src.replace('/thumb/', '/');
+            }
+            if (src.startsWith('http')) {
+                console.log('✅ Постер найден:', src);
+                return src;
+            }
+        }
+
+        // Ищем любую большую картинку в посте
+        const images = document.querySelectorAll('.post_body img');
+        for (const img of images) {
+            let src = img.src;
+            if (src && src.startsWith('http') &&
+                (src.includes('fastpic') || src.includes('imageban') || src.includes('postImg'))) {
+                // Проверяем размеры
+                if (img.width > 200 || img.height > 200) {
+                    console.log('✅ Постер найден (большое изображение):', src);
+                    return src;
+                }
+            }
+        }
+
+        console.log('❌ Постер не найден');
+        return '';
+    }
+
+    // Функция для получения URL скачивания торрента
+    function getDownloadUrl() {
+        const downloadLink = document.querySelector('a.dl-link[href*="dl.php?t="]');
+        if (downloadLink) {
+            const url = downloadLink.href;
+            console.log('✅ Ссылка на торрент найдена:', url);
+            return url;
+        }
+        console.log('❌ Ссылка на торрент не найдена');
+        return null;
+    }
+
+    // Функция для скачивания торрента через GM_xmlhttpRequest
+    function downloadTorrentGM(url) {
+        return new Promise((resolve, reject) => {
+            console.log('📥 Скачивание торрента с URL:', url);
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                responseType: 'blob',
+                onload: function(response) {
+                    console.log('📥 Ответ получен, статус:', response.status);
+                    if (response.status === 200) {
+                        console.log('📥 Торрент скачан, размер:', response.response.size, 'байт');
+                        resolve(response.response);
+                    } else {
+                        reject(new Error(`HTTP ${response.status}: ${response.statusText}`));
+                    }
+                },
+                onerror: function(error) {
+                    console.error('❌ Ошибка при скачивании торрента:', error);
+                    reject(new Error('Ошибка сети при скачивании торрента'));
+                },
+                ontimeout: function() {
+                    reject(new Error('Таймаут при скачивании торрента'));
+                },
+                timeout: 30000
+            });
+        });
+    }
+
+    // Функция для отправки торрента на сервер
+    function uploadTorrent(blob, torrentName, title, posterUrl) {
+        return new Promise((resolve, reject) => {
+            const formData = new FormData();
+            formData.append('file', blob, torrentName);
+            formData.append('save', 'true');
+            if (title) {
+                formData.append('title', title);
+            }
+            if (posterUrl) {
+                formData.append('poster', posterUrl);
+            }
+
+            // Выводим полную информацию о запросе
+            console.log('📤 ОТПРАВКА ЗАПРОСА:');
+            console.log('📤 URL:', 'http://192.168.1.133:8090/torrent/upload');
+            console.log('📤 Метод: POST');
+            console.log('📤 Заголовки:');
+            console.log('  Accept: application/json');
+            console.log('📤 Параметры формы (FormData):');
+            console.log('  file:', torrentName, `(${blob.size} байт)`);
+            console.log('  save: true');
+            console.log('  title:', title || '(пусто)');
+            console.log('  poster:', posterUrl || '(пусто)');
+            console.log('📤 Полный curl-запрос:');
+            console.log(`curl -X 'POST' \\
+  'http://192.168.1.133:8090/torrent/upload' \\
+  -H 'accept: application/json' \\
+  -H 'Content-Type: multipart/form-data' \\
+  -F 'file=@${torrentName};type=application/x-bittorrent' \\
+  -F 'save=true' \\
+  -F 'title=${title || ''}' \\
+  -F 'poster=${posterUrl || ''}'`);
+
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: 'http://192.168.1.133:8090/torrent/upload',
+                headers: {
+                    'Accept': 'application/json'
+                },
+                data: formData,
+                onload: function(response) {
+                    console.log('📥 ОТВЕТ СЕРВЕРА:');
+                    console.log('📥 Статус:', response.status);
+                    console.log('📥 Заголовки:', response.responseHeaders);
+                    console.log('📥 Тело ответа:', response.responseText);
+
+                    if (response.status === 200 || response.status === 201) {
+                        try {
+                            const jsonResponse = JSON.parse(response.responseText);
+                            console.log('✅ Ответ сервера (JSON):', jsonResponse);
+                            resolve(jsonResponse);
+                        } catch (e) {
+                            console.log('✅ Ответ сервера (текст):', response.responseText);
+                            resolve(response.responseText);
+                        }
+                    } else {
+                        reject(new Error(`HTTP ${response.status}: ${response.statusText}`));
+                    }
+                },
+                onerror: function(error) {
+                    console.error('❌ Ошибка отправки на сервер:', error);
+                    reject(new Error('Ошибка сети при отправке на сервер'));
+                },
+                ontimeout: function() {
+                    reject(new Error('Таймаут при отправке на сервер'));
+                },
+                timeout: 30000
+            });
+        });
+    }
+
+    // Основная функция
+    function addUploadButton() {
+        console.log('🔍 Поиск контейнера для кнопки...');
+
+        // Ищем контейнер с кнопкой скачивания торрента и magnet
+        const torrentContainer = document.querySelector('td[style*="padding: 10px 6px;"]');
+        if (!torrentContainer) {
+            console.log('❌ Контейнер с кнопкой скачивания не найден');
+            return;
+        }
+
+        // Проверяем, не добавлена ли уже кнопка
+        if (document.getElementById('rutracker-upload-container')) {
+            console.log('⚠️ Кнопка уже существует');
+            return;
+        }
+
+        const torrentId = getTorrentId();
+        const torrentTitle = getTorrentTitle();
+        const posterUrl = getPosterUrl();
+        const downloadUrl = getDownloadUrl();
+
+        console.log('📋 Данные раздачи:');
+        console.log('  ID:', torrentId);
+        console.log('  Title:', torrentTitle || '(пусто)');
+        console.log('  Poster URL:', posterUrl || '(пусто)');
+        console.log('  Download URL:', downloadUrl);
+
+        if (!torrentId || !downloadUrl) {
+            console.log('❌ Не удалось получить ID раздачи или URL скачивания');
+            return;
+        }
+
+        // Создаем контейнер для кнопки
+        const buttonContainer = document.createElement('div');
+        buttonContainer.id = 'rutracker-upload-container';
+        buttonContainer.style.cssText = 'padding-top: 8px; text-align: center;';
+
+        // Создаем кнопку в стиле "Список файлов"
+        const uploadButton = document.createElement('input');
+        uploadButton.id = 'rutracker-upload-button';
+        uploadButton.type = 'button';
+        uploadButton.className = 'lite';
+        uploadButton.style.cssText = 'width: 120px;';
+        uploadButton.value = '📤 Отправить';
+
+        // Создаем элемент для статуса
+        const statusDiv = document.createElement('div');
+        statusDiv.id = 'rutracker-upload-status';
+        statusDiv.style.cssText = `
+            margin-top: 5px;
+            font-size: 12px;
+            transition: opacity 0.5s ease;
+            display: none;
+            padding: 3px 8px;
+            border-radius: 3px;
+            max-width: 200px;
+            margin-left: auto;
+            margin-right: auto;
+            box-sizing: border-box;
+            word-wrap: break-word;
+        `;
+
+        buttonContainer.appendChild(uploadButton);
+        buttonContainer.appendChild(statusDiv);
+
+        // Вставляем в контейнер
+        torrentContainer.appendChild(buttonContainer);
+
+        console.log('✅ Кнопка добавлена');
+
+        // Обработчик клика
+        uploadButton.addEventListener('click', async function() {
+            const statusDiv = document.getElementById('rutracker-upload-status');
+            statusDiv.style.display = 'block';
+            statusDiv.style.opacity = '1';
+            statusDiv.innerHTML = '⏳ Скачивание торрента...';
+            statusDiv.style.color = '#333';
+            statusDiv.style.background = '#fff3cd';
+
+            uploadButton.disabled = true;
+            uploadButton.value = '⏳ Загрузка...';
+
+            try {
+                // Скачиваем торрент
+                const blob = await downloadTorrentGM(downloadUrl);
+                console.log('✅ Торрент успешно скачан, размер:', blob.size);
+
+                statusDiv.innerHTML = '⏳ Отправка на сервер...';
+                statusDiv.style.background = '#cce5ff';
+
+                const torrentName = `[rutracker.org]t${torrentId}.torrent`;
+
+                // Отправляем на сервер
+                const result = await uploadTorrent(blob, torrentName, torrentTitle, posterUrl);
+
+                statusDiv.innerHTML = '✅ Торрент успешно отправлен!';
+                statusDiv.style.color = 'green';
+                statusDiv.style.background = '#d4edda';
+
+                console.log('✅ Торрент успешно отправлен!', result);
+
+            } catch (error) {
+                console.error('❌ Ошибка:', error);
+                statusDiv.innerHTML = `❌ ${error.message || 'Неизвестная ошибка'}`;
+                statusDiv.style.color = 'red';
+                statusDiv.style.background = '#f8d7da';
+            } finally {
+                uploadButton.disabled = false;
+                uploadButton.value = '📤 Отправить';
+
+                setTimeout(() => {
+                    statusDiv.style.opacity = '0';
+                    setTimeout(() => {
+                        statusDiv.style.display = 'none';
+                    }, 500);
+                }, 5000);
+            }
+        });
+    }
+
+    // Инициализация
+    function init() {
+        console.log('🚀 Инициализация скрипта для RuTracker.org...');
+        // Ждем полной загрузки страницы
+        setTimeout(addUploadButton, 2000);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    const observer = new MutationObserver(function(mutations) {
+        if (!document.getElementById('rutracker-upload-container')) {
+            console.log('🔄 Кнопка не найдена, пробуем добавить...');
+            addUploadButton();
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+})();
