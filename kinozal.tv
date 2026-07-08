@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kinozal.tv to Torrent Upload
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.02
 // @description  Добавляет кнопку для отправки торрент-файла на локальный сервер
 // @author       Chuvakstepan, DeepSeek
 // @match        https://kinozal.tv/details.php?id=*
