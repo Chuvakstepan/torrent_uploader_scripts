@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kinozal.tv to Torrent Upload
 // @namespace    http://tampermonkey.net/
-// @version      1.02
-// @description  Добавляет кнопку для отправки торрент-файла на локальный сервер
+// @version      1.07
+// @description  Заменяет текст на гиперссылку для отправки торрент-файла на локальный сервер
 // @author       Chuvakstepan, DeepSeek
 // @match        https://kinozal.tv/details.php?id=*
 // @grant        GM_xmlhttpRequest
@@ -27,7 +27,6 @@
 
     // Функция для получения заголовка раздачи
     function getTorrentTitle() {
-        // 1. Пробуем получить из og:title
         const ogTitle = document.querySelector('meta[property="og:title"]');
         if (ogTitle) {
             const title = ogTitle.getAttribute('content');
@@ -37,7 +36,6 @@
             }
         }
 
-        // 2. Пробуем получить из schema.org Product
         const productName = document.querySelector('[itemprop="name"]');
         if (productName) {
             const title = productName.getAttribute('content');
@@ -47,7 +45,6 @@
             }
         }
 
-        // 3. Пробуем получить из h1
         const h1Title = document.querySelector('h1 a.r1, h1 a.r0');
         if (h1Title) {
             const title = h1Title.textContent.trim();
@@ -57,7 +54,6 @@
             }
         }
 
-        // 4. Пробуем получить из title страницы
         const pageTitle = document.querySelector('title');
         if (pageTitle) {
             let title = pageTitle.textContent.trim();
@@ -74,7 +70,6 @@
 
     // Функция для получения URL постера
     function getPosterUrl() {
-        // 1. Пробуем получить из og:image
         const ogImage = document.querySelector('meta[property="og:image"]');
         if (ogImage) {
             let url = ogImage.getAttribute('content');
@@ -91,7 +86,6 @@
             }
         }
 
-        // 2. Ищем изображение в меню раздачи
         const menuImage = document.querySelector('.mn1_menu .p200');
         if (menuImage) {
             let src = menuImage.src;
@@ -108,7 +102,6 @@
             }
         }
 
-        // 3. Ищем другие изображения постера
         const posterImg = document.querySelector('img[src*="/i/poster/"]');
         if (posterImg) {
             let src = posterImg.src;
@@ -228,29 +221,36 @@
     }
 
     // Основная функция
-    function addUploadButton() {
-        console.log('🔍 Поиск контейнера с кнопкой скачивания...');
+    function replaceTextWithLink() {
+        console.log('🔍 Поиск td с кнопкой скачивания...');
 
-        const downloadTable = document.querySelector('table.w100p');
-        if (!downloadTable) {
-            console.log('❌ Таблица с кнопкой скачивания не найдена');
+        // Ищем td с ссылкой на скачивание
+        const downloadTd = document.querySelector('td.nw a[href*="dl.kinozal.tv/download.php"]');
+        if (!downloadTd) {
+            console.log('❌ TD с кнопкой скачивания не найден');
             return;
         }
 
-        const downloadCell = downloadTable.querySelector('td.nw');
-        if (!downloadCell) {
-            console.log('❌ Ячейка с кнопкой скачивания не найдена');
+        // Находим родительский td
+        const parentTd = downloadTd.closest('td.nw');
+        if (!parentTd) {
+            console.log('❌ Родительский td не найден');
             return;
         }
 
-        const originalLink = downloadCell.querySelector('a[href*="dl.kinozal.tv/download.php"]');
-        if (!originalLink) {
-            console.log('❌ Ссылка скачивания не найдена');
+        console.log('✅ Найден td с кнопкой скачивания');
+
+        // Ищем следующий td (с текстом)
+        const nextTd = parentTd.nextElementSibling;
+        if (!nextTd || nextTd.tagName !== 'TD') {
+            console.log('❌ Следующий td не найден');
             return;
         }
 
-        if (document.getElementById('torrent-upload-container')) {
-            console.log('⚠️ Кнопка уже существует');
+        console.log('✅ Найден следующий td с текстом');
+
+        if (document.getElementById('torrent-upload-link-container')) {
+            console.log('⚠️ Ссылка уже существует');
             return;
         }
 
@@ -270,102 +270,104 @@
             return;
         }
 
-        // Создаем контейнер для кнопки
-        const buttonContainer = document.createElement('div');
-        buttonContainer.id = 'torrent-upload-container';
-        buttonContainer.style.cssText = 'margin-top: 10px; text-align: center;';
+        // Очищаем ячейку
+        nextTd.innerHTML = '';
 
-         // Создаем ссылку-кнопку, точно как оригинальная
+        // Создаем контейнер с flex для расположения в строку
+        const linkContainer = document.createElement('div');
+        linkContainer.id = 'torrent-upload-link-container';
+        linkContainer.style.cssText = `
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 10px;
+            padding: 2px 0;
+            flex-wrap: wrap;
+        `;
+
+        // Создаем уменьшенную гиперссылку
         const uploadLink = document.createElement('a');
-        uploadLink.id = 'torrent-upload-button';
+        uploadLink.id = 'torrent-upload-link';
         uploadLink.href = '#';
         uploadLink.style.cssText = `
             display: inline-block;
-            background: #4CAF50;
-            color: #fff;
+            color: #0066cc;
             font-size: 13px;
-            font-weight: bold;
-            padding: 4px 12px;
-            border-radius: 3px;
-            text-decoration: none;
+            font-weight: 700;
+            text-decoration: underline;
             cursor: pointer;
-            border: 1px solid #45a049;
-            text-align: center;
-            width: 200px;
-            box-sizing: border-box;
+            padding: 3px 10px;
             transition: all 0.2s ease;
-            line-height: 25px;
-            height: 25px;
+            background: #f0f8ff;
+            border-radius: 3px;
+            border: 1px solid #b8d4f0;
+            white-space: nowrap;
+            line-height: 20px;
         `;
         uploadLink.textContent = '📤 Отправить на сервер';
 
-        // Ховер эффект как у оригинальной кнопки
+        // Ховер эффект
         uploadLink.onmouseover = function() {
-            this.style.background = '#45a049';
-            this.style.borderColor = '#3d8b40';
+            this.style.color = '#ff6b00';
+            this.style.background = '#fff0e6';
+            this.style.borderColor = '#ff6b00';
         };
         uploadLink.onmouseout = function() {
-            this.style.background = '#4CAF50';
-            this.style.borderColor = '#45a049';
+            this.style.color = '#0066cc';
+            this.style.background = '#f0f8ff';
+            this.style.borderColor = '#b8d4f0';
         };
 
-        // Создаем элемент для статуса
+        // Создаем элемент для статуса (маленький, справа)
         const statusDiv = document.createElement('div');
-        statusDiv.id = 'torrent-upload-status';
+        statusDiv.id = 'torrent-upload-status-link';
         statusDiv.style.cssText = `
-            margin-top: 8px;
             font-size: 12px;
             color: #333;
             display: none;
-            padding: 4px 8px;
+            padding: 2px 8px;
             border-radius: 3px;
             background: #f8f9fa;
             border: 1px solid #ddd;
-            max-width: 200px;
-            margin-left: auto;
-            margin-right: auto;
-            word-wrap: break-word;
+            white-space: nowrap;
+            line-height: 20px;
+            transition: all 0.3s ease;
         `;
 
-        buttonContainer.appendChild(uploadLink);
-        buttonContainer.appendChild(statusDiv);
+        linkContainer.appendChild(uploadLink);
+        linkContainer.appendChild(statusDiv);
+        nextTd.appendChild(linkContainer);
 
-        // Вставляем после оригинальной ссылки
-        originalLink.parentElement.insertBefore(buttonContainer, originalLink.nextSibling);
-
-        console.log('✅ Кнопка добавлена');
+        console.log('✅ Текст заменен на гиперссылку');
 
         // Обработчик клика
         uploadLink.addEventListener('click', async function(e) {
             e.preventDefault();
 
-            const statusDiv = document.getElementById('torrent-upload-status');
-            statusDiv.style.display = 'block';
-            statusDiv.innerHTML = '⏳ Скачивание торрента...';
+            const statusDiv = document.getElementById('torrent-upload-status-link');
+            statusDiv.style.display = 'inline-block';
+            statusDiv.innerHTML = '⏳ Скачивание...';
             statusDiv.style.background = '#fff3cd';
             statusDiv.style.borderColor = '#ffc107';
 
             uploadLink.textContent = '⏳ Загрузка...';
-            uploadLink.style.opacity = '0.7';
             uploadLink.style.cursor = 'wait';
             uploadLink.onmouseover = null;
             uploadLink.onmouseout = null;
 
             try {
-                // Скачиваем торрент
                 const blob = await downloadTorrentGM(downloadUrl);
                 console.log('✅ Торрент успешно скачан, размер:', blob.size);
 
-                statusDiv.innerHTML = '⏳ Отправка на сервер...';
+                statusDiv.innerHTML = '⏳ Отправка...';
                 statusDiv.style.background = '#cce5ff';
                 statusDiv.style.borderColor = '#b8daff';
 
                 const torrentName = `[kinozal.tv]id${torrentId}.torrent`;
 
-                // Отправляем на сервер
                 const result = await uploadTorrent(blob, torrentName, torrentTitle, posterUrl);
 
-                statusDiv.innerHTML = '✅ Торрент успешно отправлен!';
+                statusDiv.innerHTML = '✅ Отправлен!';
                 statusDiv.style.background = '#d4edda';
                 statusDiv.style.borderColor = '#c3e6cb';
                 statusDiv.style.color = 'green';
@@ -374,21 +376,23 @@
 
             } catch (error) {
                 console.error('❌ Ошибка:', error);
-                statusDiv.innerHTML = `❌ ${error.message || 'Неизвестная ошибка'}`;
+                statusDiv.innerHTML = '❌ Ошибка';
                 statusDiv.style.background = '#f8d7da';
                 statusDiv.style.borderColor = '#f5c6cb';
                 statusDiv.style.color = 'red';
+                statusDiv.title = error.message || 'Неизвестная ошибка';
             } finally {
                 uploadLink.textContent = '📤 Отправить на сервер';
-                uploadLink.style.opacity = '1';
                 uploadLink.style.cursor = 'pointer';
                 uploadLink.onmouseover = function() {
-                    this.style.background = '#45a049';
-                    this.style.borderColor = '#3d8b40';
+                    this.style.color = '#ff6b00';
+                    this.style.background = '#fff0e6';
+                    this.style.borderColor = '#ff6b00';
                 };
                 uploadLink.onmouseout = function() {
-                    this.style.background = '#4CAF50';
-                    this.style.borderColor = '#45a049';
+                    this.style.color = '#0066cc';
+                    this.style.background = '#f0f8ff';
+                    this.style.borderColor = '#b8d4f0';
                 };
 
                 setTimeout(() => {
@@ -396,8 +400,8 @@
                     setTimeout(() => {
                         statusDiv.style.display = 'none';
                         statusDiv.style.opacity = '1';
-                    }, 500);
-                }, 5000);
+                    }, 300);
+                }, 3000);
             }
         });
     }
@@ -405,7 +409,8 @@
     // Инициализация
     function init() {
         console.log('🚀 Инициализация скрипта...');
-        setTimeout(addUploadButton, 1500);
+        setTimeout(replaceTextWithLink, 1500);
+        setTimeout(replaceTextWithLink, 3000);
     }
 
     if (document.readyState === 'loading') {
@@ -414,10 +419,11 @@
         init();
     }
 
+    // Наблюдатель за изменениями
     const observer = new MutationObserver(function(mutations) {
-        if (!document.getElementById('torrent-upload-container')) {
-            console.log('🔄 Кнопка не найдена, пробуем добавить...');
-            addUploadButton();
+        if (!document.getElementById('torrent-upload-link-container')) {
+            console.log('🔄 Ссылка не найдена, пробуем добавить...');
+            replaceTextWithLink();
         }
     });
     observer.observe(document.body, { childList: true, subtree: true });
