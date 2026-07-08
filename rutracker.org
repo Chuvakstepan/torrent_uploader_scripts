@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RuTracker.org to Torrent Upload
 // @namespace    http://tampermonkey.net/
-// @version      1.01
+// @version      1.02
 // @description  Добавляет кнопку для отправки торрент-файла на локальный сервер
 // @author       You
 // @match        https://rutracker.org/forum/viewtopic.php?t=*
