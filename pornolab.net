@@ -1,0 +1,560 @@
+// ==UserScript==
+// @name         Pornolab.net to Transmission Upload
+// @namespace    http://tampermonkey.net/
+// @version      2.4
+// @description  Добавляет кнопку для отправки торрент-файла в Transmission
+// @author       Chuvakstepan, DeepSeek
+// @match        https://pornolab.net/forum/viewtopic.php?t=*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_download
+// @connect      192.168.1.73
+// @connect      pornolab.net
+// @connect      static.pornolab.net
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Проверяем, не запущен ли уже скрипт
+    if (window._pornolab_transmission_loaded) {
+        console.log('⚠️ Скрипт уже запущен');
+        return;
+    }
+    window._pornolab_transmission_loaded = true;
+
+    console.log('=== Скрипт Pornolab.net Transmission Uploader запущен ===');
+
+    // Конфигурация Transmission
+    const TRANSMISSION_CONFIG = {
+        host: '192.168.1.73',
+        port: 9092,
+        username: 'admin',
+        password: 'chuvakadmin',
+        downloadDir: '/mnt/HD/HD_a2/Public/Downloads/Test/VR/'
+    };
+
+    let sessionId = null;
+
+    // Функция для получения Session ID
+    function getSessionId() {
+        return new Promise((resolve, reject) => {
+            if (sessionId) {
+                resolve(sessionId);
+                return;
+            }
+
+            console.log('🔑 Получение Session ID...');
+
+            const authString = btoa(`${TRANSMISSION_CONFIG.username}:${TRANSMISSION_CONFIG.password}`);
+            const url = `http://${TRANSMISSION_CONFIG.host}:${TRANSMISSION_CONFIG.port}/transmission/rpc`;
+
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: url,
+                headers: {
+                    'Authorization': `Basic ${authString}`
+                },
+                onload: function(response) {
+                    console.log('📥 Статус получения Session ID:', response.status);
+
+                    if (response.status === 409) {
+                        const newSessionId = response.responseHeaders.match(/X-Transmission-Session-Id:\s*([^\s]+)/i);
+                        if (newSessionId && newSessionId[1]) {
+                            sessionId = newSessionId[1];
+                            console.log('✅ Session ID получен:', sessionId);
+                            resolve(sessionId);
+                        } else {
+                            reject(new Error('Не удалось получить Session ID'));
+                        }
+                    } else if (response.status === 401) {
+                        reject(new Error('Ошибка авторизации. Проверьте логин и пароль.'));
+                    } else {
+                        reject(new Error(`Неожиданный ответ: ${response.status}`));
+                    }
+                },
+                onerror: function(error) {
+                    reject(new Error('Ошибка подключения к Transmission'));
+                },
+                ontimeout: function() {
+                    reject(new Error('Таймаут подключения'));
+                },
+                timeout: 10000
+            });
+        });
+    }
+
+    // Функция для выполнения RPC запроса
+    function transmissionRpc(method, args = {}) {
+        return new Promise((resolve, reject) => {
+            const data = {
+                method: method,
+                arguments: args
+            };
+
+            const authString = btoa(`${TRANSMISSION_CONFIG.username}:${TRANSMISSION_CONFIG.password}`);
+            const url = `http://${TRANSMISSION_CONFIG.host}:${TRANSMISSION_CONFIG.port}/transmission/rpc`;
+
+            const headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Basic ${authString}`
+            };
+
+            if (sessionId) {
+                headers['X-Transmission-Session-Id'] = sessionId;
+            }
+
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: url,
+                headers: headers,
+                data: JSON.stringify(data),
+                onload: function(response) {
+                    try {
+                        // Если session ID устарел
+                        if (response.status === 409) {
+                            const newSessionId = response.responseHeaders.match(/X-Transmission-Session-Id:\s*([^\s]+)/i);
+                            if (newSessionId && newSessionId[1]) {
+                                sessionId = newSessionId[1];
+                                console.log('🔄 Session ID обновлен');
+
+                                const newHeaders = {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Basic ${authString}`,
+                                    'X-Transmission-Session-Id': sessionId
+                                };
+
+                                GM_xmlhttpRequest({
+                                    method: 'POST',
+                                    url: url,
+                                    headers: newHeaders,
+                                    data: JSON.stringify(data),
+                                    onload: function(retryResponse) {
+                                        try {
+                                            const result = JSON.parse(retryResponse.responseText);
+                                            if (result.result === 'success') {
+                                                resolve(result);
+                                            } else {
+                                                reject(new Error(`Transmission error: ${result.result}`));
+                                            }
+                                        } catch (e) {
+                                            reject(new Error('Ошибка обработки ответа'));
+                                        }
+                                    },
+                                    onerror: function() {
+                                        reject(new Error('Ошибка повторного запроса'));
+                                    }
+                                });
+                            } else {
+                                reject(new Error('Не удалось обновить Session ID'));
+                            }
+                            return;
+                        }
+
+                        if (response.status === 401) {
+                            reject(new Error('Ошибка авторизации в Transmission'));
+                            return;
+                        }
+
+                        if (response.status !== 200) {
+                            reject(new Error(`HTTP ${response.status}`));
+                            return;
+                        }
+
+                        const result = JSON.parse(response.responseText);
+                        if (result.result === 'success') {
+                            resolve(result);
+                        } else {
+                            reject(new Error(`Transmission error: ${result.result}`));
+                        }
+                    } catch (e) {
+                        console.error('❌ Ошибка:', e);
+                        reject(new Error('Ошибка обработки ответа от Transmission'));
+                    }
+                },
+                onerror: function(error) {
+                    reject(new Error('Ошибка сети при подключении к Transmission'));
+                },
+                ontimeout: function() {
+                    reject(new Error('Таймаут при подключении к Transmission'));
+                },
+                timeout: 30000
+            });
+        });
+    }
+
+    // Функция для получения свободного места
+    async function getFreeSpace() {
+        try {
+            console.log('📊 Проверка свободного места...');
+
+            if (!sessionId) {
+                await getSessionId();
+            }
+
+            const result = await transmissionRpc('session-get');
+
+            if (result.arguments && result.arguments['download-dir-free-space'] !== undefined) {
+                const freeSpace = result.arguments['download-dir-free-space'];
+                const freeSpaceGB = freeSpace / 1024 / 1024 / 1024;
+                console.log(`📊 Свободно: ${freeSpaceGB.toFixed(2)} Гб`);
+                return freeSpace;
+            }
+
+            return null;
+        } catch (error) {
+            console.warn('⚠️ Ошибка получения свободного места:', error.message);
+            return null;
+        }
+    }
+
+    // Функция для добавления торрента
+    async function addTorrentToTransmission(torrentData, torrentName, title, torrentUrl) {
+        console.log('📤 Добавление торрента в Transmission...');
+
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = async function(event) {
+                try {
+                    const base64Data = event.target.result.split(',')[1];
+
+                    if (!sessionId) {
+                        await getSessionId();
+                    }
+
+                    const args = {
+                        'metainfo': base64Data,
+                        'download-dir': TRANSMISSION_CONFIG.downloadDir,
+                        'paused': false,
+                        'labels': [torrentUrl || torrentName]
+                    };
+
+                    if (title) {
+                        args['name'] = title;
+                    }
+
+                    const result = await transmissionRpc('torrent-add', args);
+
+                    if (result.arguments && result.arguments['torrent-added']) {
+                        const hash = result.arguments['torrent-added'].hashString;
+                        console.log(`✅ Торрент добавлен! Hash: ${hash}`);
+                        resolve({
+                            success: true,
+                            hash: hash,
+                            message: 'Торрент успешно добавлен в Transmission'
+                        });
+                    } else if (result.arguments && result.arguments['torrent-duplicate']) {
+                        const hash = result.arguments['torrent-duplicate'].hashString;
+                        console.log(`⚠️ Торрент уже существует! Hash: ${hash}`);
+                        resolve({
+                            success: true,
+                            hash: hash,
+                            message: 'Торрент уже существует в Transmission',
+                            duplicate: true
+                        });
+                    } else {
+                        reject(new Error('Не удалось добавить торрент'));
+                    }
+                } catch (error) {
+                    reject(error);
+                }
+            };
+
+            reader.onerror = function() {
+                reject(new Error('Ошибка чтения торрент-файла'));
+            };
+
+            reader.readAsDataURL(torrentData);
+        });
+    }
+
+    // Функция для получения данных раздачи
+    function getTorrentData() {
+        const torrentId = new URLSearchParams(window.location.search).get('t');
+
+        // Получаем заголовок
+        let title = '';
+        const h1Title = document.querySelector('#topic-title');
+        if (h1Title) {
+            title = h1Title.textContent.trim().replace(/\[.*?\]/g, '').trim();
+            if (title.length > 100) title = title.substring(0, 100) + '...';
+        }
+
+        // Получаем ссылку на скачивание
+        const downloadLink = document.querySelector('a.dl-stub[href*="dl.php?t="]');
+        const downloadUrl = downloadLink ? downloadLink.href : null;
+
+        return { torrentId, title, downloadUrl };
+    }
+
+    // Функция для скачивания торрента
+    function downloadTorrent(url) {
+        return new Promise((resolve, reject) => {
+            console.log('📥 Скачивание торрента...');
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                responseType: 'blob',
+                onload: function(response) {
+                    if (response.status === 200) {
+                        console.log('📥 Торрент скачан, размер:', response.response.size, 'байт');
+                        resolve(response.response);
+                    } else {
+                        reject(new Error(`HTTP ${response.status}`));
+                    }
+                },
+                onerror: function() {
+                    reject(new Error('Ошибка скачивания торрента'));
+                },
+                ontimeout: function() {
+                    reject(new Error('Таймаут скачивания'));
+                },
+                timeout: 30000
+            });
+        });
+    }
+
+    // Основная функция добавления кнопки
+    function addUploadButton() {
+        console.log('🔍 Поиск места для кнопки...');
+
+        // Проверяем, не добавлена ли уже кнопка
+        if (document.getElementById('rutracker-upload-container')) {
+            console.log('⚠️ Кнопка уже существует');
+            return;
+        }
+
+        // Ищем кнопку "Список файлов"
+        const fileListBtn = document.getElementById('tor-filelist-btn');
+        if (!fileListBtn) {
+            console.log('⏳ Кнопка "Список файлов" не найдена');
+            return;
+        }
+
+        // Получаем данные раздачи
+        const data = getTorrentData();
+        if (!data.torrentId || !data.downloadUrl) {
+            console.log('❌ Не удалось получить данные раздачи');
+            return;
+        }
+
+        console.log('📋 Данные раздачи:');
+        console.log('  ID:', data.torrentId);
+        console.log('  Title:', data.title);
+        console.log('  URL:', data.downloadUrl);
+
+        // Находим родительский <p> с кнопкой "Список файлов"
+        const fileListP = fileListBtn.closest('p');
+        if (!fileListP) {
+            console.log('❌ Не найден <p> с кнопкой');
+            return;
+        }
+
+        // Находим родительский <td>
+        const parentTd = fileListP.closest('td');
+        if (!parentTd) {
+            console.log('❌ Не найден <td>');
+            return;
+        }
+
+        // Создаем контейнер для кнопки
+        const buttonContainer = document.createElement('div');
+        buttonContainer.id = 'rutracker-upload-container';
+        buttonContainer.style.cssText = 'padding-top: 8px; text-align: center;';
+
+        // Создаем кнопку
+        const uploadButton = document.createElement('input');
+        uploadButton.id = 'rutracker-upload-button';
+        uploadButton.type = 'button';
+        uploadButton.className = 'lite';
+        uploadButton.style.cssText = 'width: 120px; cursor: pointer;';
+        uploadButton.value = '📤 Отправить';
+
+        // Создаем элемент для статуса
+        const statusDiv = document.createElement('div');
+        statusDiv.id = 'rutracker-upload-status';
+        statusDiv.style.cssText = `
+            margin-top: 5px;
+            font-size: 12px;
+            transition: opacity 0.5s ease;
+            display: none;
+            padding: 3px 8px;
+            border-radius: 3px;
+            max-width: 200px;
+            margin-left: auto;
+            margin-right: auto;
+            box-sizing: border-box;
+            word-wrap: break-word;
+        `;
+
+        buttonContainer.appendChild(uploadButton);
+        buttonContainer.appendChild(statusDiv);
+
+        // Вставляем контейнер внутрь <td> после <p>
+        parentTd.insertBefore(buttonContainer, fileListP.nextSibling);
+
+        console.log('✅ Кнопка добавлена внутри <td> под "Список файлов"');
+
+        // Проверяем свободное место
+        (async function() {
+            try {
+                const freeSpace = await getFreeSpace();
+                if (freeSpace !== null) {
+                    const freeSpaceGB = freeSpace / 1024 / 1024 / 1024;
+                    statusDiv.style.display = 'block';
+                    statusDiv.style.opacity = '1';
+                    statusDiv.innerHTML = `💾 Свободно: ${freeSpaceGB.toFixed(2)} Гб`;
+                    statusDiv.style.color = '#155724';
+                    statusDiv.style.background = '#d4edda';
+
+                    setTimeout(() => {
+                        statusDiv.style.opacity = '0';
+                        setTimeout(() => {
+                            statusDiv.style.display = 'none';
+                            statusDiv.style.opacity = '1';
+                        }, 500);
+                    }, 5000);
+                }
+            } catch (e) {
+                console.warn('⚠️ Ошибка проверки места:', e);
+            }
+        })();
+
+        // Обработчик клика
+        uploadButton.addEventListener('click', async function() {
+            const statusDiv = document.getElementById('rutracker-upload-status');
+
+            // Показываем статус
+            statusDiv.style.display = 'block';
+            statusDiv.style.opacity = '1';
+
+            // Отключаем кнопку
+            uploadButton.disabled = true;
+            uploadButton.value = '⏳ Загрузка...';
+
+            try {
+                // 1. Проверяем свободное место
+                statusDiv.innerHTML = '⏳ Проверка свободного места...';
+                statusDiv.style.color = '#333';
+                statusDiv.style.background = '#fff3cd';
+
+                const freeSpace = await getFreeSpace();
+
+                if (freeSpace !== null) {
+                    const freeSpaceGB = freeSpace / 1024 / 1024 / 1024;
+                    const MIN_FREE_SPACE = 5 * 1024 * 1024 * 1024;
+
+                    if (freeSpace < MIN_FREE_SPACE) {
+                        throw new Error(`Недостаточно места! Свободно: ${freeSpaceGB.toFixed(2)} Гб, нужно минимум 5 Гб`);
+                    }
+
+                    // Показываем свободное место
+                    statusDiv.innerHTML = `💾 Свободно: ${freeSpaceGB.toFixed(2)} Гб`;
+                    statusDiv.style.color = '#155724';
+                    statusDiv.style.background = '#d4edda';
+
+                    // Небольшая пауза для отображения информации о месте
+                    await new Promise(resolve => setTimeout(resolve, 800));
+                }
+
+                // 2. Скачиваем торрент
+                statusDiv.innerHTML = '⏳ Скачивание торрента...';
+                statusDiv.style.color = '#333';
+                statusDiv.style.background = '#cce5ff';
+
+                const blob = await downloadTorrent(data.downloadUrl);
+                console.log('✅ Торрент скачан, размер:', blob.size);
+
+                // 3. Отправляем в Transmission
+                statusDiv.innerHTML = '⏳ Отправка в Transmission...';
+                statusDiv.style.background = '#cce5ff';
+
+                const torrentName = `[pornolab.net]t${data.torrentId}.torrent`;
+                const result = await addTorrentToTransmission(blob, torrentName, data.title, data.downloadUrl);
+
+                // 4. Успех! Сразу показываем финальный статус
+                let message = '✅ Торрент успешно добавлен в Transmission!';
+                let bgColor = '#d4edda';
+                let textColor = '#155724';
+
+                if (result.duplicate) {
+                    message = '⚠️ Торрент уже существует в Transmission';
+                    bgColor = '#fff3cd';
+                    textColor = '#856404';
+                }
+
+                statusDiv.innerHTML = message;
+                statusDiv.style.color = textColor;
+                statusDiv.style.background = bgColor;
+
+                console.log('✅ Успешно!', result);
+
+            } catch (error) {
+                console.error('❌ Ошибка:', error);
+
+                let errorMessage = error.message || 'Неизвестная ошибка';
+                if (errorMessage.includes('401')) {
+                    errorMessage = '❌ Ошибка авторизации в Transmission';
+                } else if (errorMessage.includes('ECONNREFUSED')) {
+                    errorMessage = '❌ Не удалось подключиться к Transmission';
+                } else if (errorMessage.includes('недостаточно')) {
+                    errorMessage = '❌ ' + errorMessage;
+                }
+
+                statusDiv.innerHTML = errorMessage;
+                statusDiv.style.color = '#721c24';
+                statusDiv.style.background = '#f8d7da';
+            } finally {
+                // Включаем кнопку обратно
+                uploadButton.disabled = false;
+                uploadButton.value = '📤 Отправить';
+
+                // Через 5 секунд скрываем статус
+                setTimeout(() => {
+                    statusDiv.style.opacity = '0';
+                    setTimeout(() => {
+                        statusDiv.style.display = 'none';
+                        statusDiv.style.opacity = '1';
+                    }, 500);
+                }, 5000);
+            }
+        });
+    }
+
+    // Инициализация
+    function init() {
+        console.log('🚀 Инициализация...');
+
+        // Удаляем старые кнопки
+        const oldContainers = document.querySelectorAll('#rutracker-upload-container');
+        oldContainers.forEach(el => el.remove());
+
+        // Ждем появления кнопки "Список файлов"
+        let attempts = 0;
+        const maxAttempts = 20;
+
+        const checkInterval = setInterval(() => {
+            attempts++;
+            const fileListBtn = document.getElementById('tor-filelist-btn');
+
+            if (fileListBtn) {
+                clearInterval(checkInterval);
+                console.log('✅ Кнопка "Список файлов" найдена');
+                addUploadButton();
+            } else if (attempts >= maxAttempts) {
+                clearInterval(checkInterval);
+                console.log('⚠️ Кнопка "Список файлов" не найдена, пробуем добавить вручную');
+                addUploadButton();
+            }
+        }, 500);
+    }
+
+    // Запускаем
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+})();
