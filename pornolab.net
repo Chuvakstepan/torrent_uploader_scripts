@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Pornolab.net to Transmission Upload
 // @namespace    http://tampermonkey.net/
-// @version      2.4
-// @description  Добавляет кнопку для отправки торрент-файла в Transmission
+// @version      2.6
+// @description  Добавляет кнопку для отправки торрент-файла в Transmission и управления торрентами
 // @author       Chuvakstepan, DeepSeek
 // @match        https://pornolab.net/forum/viewtopic.php?t=*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
+// @grant        GM_registerMenuCommand
 // @connect      192.168.1.73
 // @connect      pornolab.net
 // @connect      static.pornolab.net
@@ -56,8 +57,6 @@
                     'Authorization': `Basic ${authString}`
                 },
                 onload: function(response) {
-                    console.log('📥 Статус получения Session ID:', response.status);
-
                     if (response.status === 409) {
                         const newSessionId = response.responseHeaders.match(/X-Transmission-Session-Id:\s*([^\s]+)/i);
                         if (newSessionId && newSessionId[1]) {
@@ -111,7 +110,6 @@
                 data: JSON.stringify(data),
                 onload: function(response) {
                     try {
-                        // Если session ID устарел
                         if (response.status === 409) {
                             const newSessionId = response.responseHeaders.match(/X-Transmission-Session-Id:\s*([^\s]+)/i);
                             if (newSessionId && newSessionId[1]) {
@@ -181,6 +179,147 @@
                 timeout: 30000
             });
         });
+    }
+
+    // Функция для получения списка торрентов в папке (УЛУЧШЕННАЯ)
+    async function getTorrentsInFolder(downloadDir) {
+        try {
+            if (!sessionId) {
+                await getSessionId();
+            }
+
+            const result = await transmissionRpc('torrent-get', {
+                fields: ['id', 'name', 'hashString', 'downloadDir', 'addedDate', 'totalSize', 'status', 'labels', 'error']
+            });
+
+            if (!result.arguments || !result.arguments.torrents) {
+                return [];
+            }
+
+            // Нормализуем целевой путь (убираем лишние слеши в конце)
+            const normalizedTargetDir = downloadDir.replace(/\/+$/, '');
+            console.log('📂 Целевая папка (нормализованная):', normalizedTargetDir);
+            console.log('📋 Всего торрентов в Transmission:', result.arguments.torrents.length);
+
+            // Выводим все пути для отладки
+            console.log('📂 Пути всех торрентов:');
+            result.arguments.torrents.forEach(t => {
+                console.log(`  - ${t.name || 'Без названия'}: ${t.downloadDir || 'Нет пути'}`);
+            });
+
+            // Фильтруем торренты по папке загрузки (более гибкая проверка)
+            const torrents = result.arguments.torrents.filter(t => {
+                if (!t.downloadDir) return false;
+
+                // Нормализуем путь торрента
+                const normalizedTorrentDir = t.downloadDir.replace(/\/+$/, '');
+
+                // Проверяем совпадение путей (игнорируем регистр и слеши в конце)
+                const matches = normalizedTorrentDir.toLowerCase() === normalizedTargetDir.toLowerCase() ||
+                               normalizedTorrentDir.toLowerCase().includes(normalizedTargetDir.toLowerCase()) ||
+                               normalizedTargetDir.toLowerCase().includes(normalizedTorrentDir.toLowerCase());
+
+                if (matches) {
+                    console.log(`  ✅ НАЙДЕН: ${t.name || 'Без названия'} (${t.downloadDir})`);
+                }
+                return matches;
+            });
+
+            // Сортируем по дате добавления (старые сначала)
+            torrents.sort((a, b) => (a.addedDate || 0) - (b.addedDate || 0));
+
+            console.log(`📊 Найдено ${torrents.length} торрентов в папке`);
+
+            // Если торрентов мало, возможно путь отличается - пробуем найти все с похожим путем
+            if (torrents.length < 3) {
+                console.log('🔍 Мало торрентов найдено, пробуем расширенный поиск...');
+                // Ищем все торренты, у которых путь содержит 'VR' или 'Test/VR'
+                const allTorrents = result.arguments.torrents.filter(t => {
+                    if (!t.downloadDir) return false;
+                    return t.downloadDir.includes('VR') || t.downloadDir.includes('Test/VR');
+                });
+
+                if (allTorrents.length > torrents.length) {
+                    console.log(`📊 Расширенный поиск: найдено ${allTorrents.length} торрентов`);
+                    allTorrents.sort((a, b) => (a.addedDate || 0) - (b.addedDate || 0));
+                    return allTorrents;
+                }
+            }
+
+            return torrents;
+        } catch (error) {
+            console.error('❌ Ошибка получения списка торрентов:', error);
+            throw error;
+        }
+    }
+
+    // Функция для удаления торрента с файлами
+    async function deleteTorrentWithFiles(torrentId) {
+        try {
+            if (!sessionId) {
+                await getSessionId();
+            }
+
+            const result = await transmissionRpc('torrent-remove', {
+                ids: [torrentId],
+                'delete-local-data': true
+            });
+
+            console.log(`✅ Торрент ${torrentId} удален с файлами`);
+            return result;
+        } catch (error) {
+            console.error('❌ Ошибка удаления торрента:', error);
+            throw error;
+        }
+    }
+
+    // Функция для удаления старых торрентов
+    async function deleteOldTorrents(count = 5) {
+        try {
+            console.log(`🗑️ Удаление ${count} старых торрентов...`);
+
+            const torrents = await getTorrentsInFolder(TRANSMISSION_CONFIG.downloadDir);
+
+            if (torrents.length === 0) {
+                console.log('ℹ️ Нет торрентов в папке для удаления');
+                return { success: false, message: 'Нет торрентов в папке для удаления' };
+            }
+
+            // Берем первые N (самые старые)
+            const toDelete = torrents.slice(0, Math.min(count, torrents.length));
+
+            console.log(`📋 Найдено ${torrents.length} торрентов, удаляем ${toDelete.length} старых:`);
+            toDelete.forEach(t => {
+                console.log(`  - ${t.name || 'Без названия'} (добавлен: ${t.addedDate ? new Date(t.addedDate * 1000).toLocaleDateString() : 'неизвестно'})`);
+            });
+
+            // Удаляем каждый торрент
+            let deletedCount = 0;
+            for (const torrent of toDelete) {
+                try {
+                    await deleteTorrentWithFiles(torrent.id);
+                    deletedCount++;
+                } catch (e) {
+                    console.error(`⚠️ Ошибка удаления торрента ${torrent.id}:`, e);
+                }
+            }
+
+            const message = `✅ Удалено ${deletedCount} из ${toDelete.length} старых торрентов из папки VR`;
+            console.log(message);
+
+            return {
+                success: true,
+                message: message,
+                deleted: deletedCount,
+                total: torrents.length
+            };
+        } catch (error) {
+            console.error('❌ Ошибка удаления старых торрентов:', error);
+            return {
+                success: false,
+                message: `❌ Ошибка: ${error.message}`
+            };
+        }
     }
 
     // Функция для получения свободного места
@@ -272,7 +411,6 @@
     function getTorrentData() {
         const torrentId = new URLSearchParams(window.location.search).get('t');
 
-        // Получаем заголовок
         let title = '';
         const h1Title = document.querySelector('#topic-title');
         if (h1Title) {
@@ -280,7 +418,6 @@
             if (title.length > 100) title = title.substring(0, 100) + '...';
         }
 
-        // Получаем ссылку на скачивание
         const downloadLink = document.querySelector('a.dl-stub[href*="dl.php?t="]');
         const downloadUrl = downloadLink ? downloadLink.href : null;
 
@@ -315,24 +452,144 @@
         });
     }
 
+    // Регистрируем команды в меню Tampermonkey
+    GM_registerMenuCommand('🧹 Удалить 5 старых торрентов из VR', async function() {
+        // Создаем диалог
+        const dialog = document.createElement('div');
+        dialog.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 20px 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            z-index: 9999;
+            font-size: 14px;
+            text-align: center;
+            max-width: 400px;
+            font-family: Arial, sans-serif;
+        `;
+        document.body.appendChild(dialog);
+
+        try {
+            dialog.innerHTML = '⏳ Проверка торрентов в папке VR...';
+
+            // Получаем список торрентов для отладки
+            const allTorrents = await getTorrentsInFolder(TRANSMISSION_CONFIG.downloadDir);
+
+            const result = await deleteOldTorrents(5);
+
+            if (result.success) {
+                dialog.innerHTML = `
+                    ✅ ${result.message}
+                    <br><br>
+                    ${result.deleted > 0 ? `Удалено ${result.deleted} торрентов` : 'Нечего удалять'}
+                    <br><br>
+                    <button onclick="this.parentElement.remove()" style="padding: 5px 20px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc;">OK</button>
+                `;
+            } else {
+                dialog.innerHTML = `
+                    ${result.message}
+                    <br><br>
+                    <button onclick="this.parentElement.remove()" style="padding: 5px 20px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc;">OK</button>
+                `;
+            }
+        } catch (error) {
+            dialog.innerHTML = `
+                ❌ Ошибка: ${error.message}
+                <br><br>
+                <button onclick="this.parentElement.remove()" style="padding: 5px 20px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc;">OK</button>
+            `;
+        }
+    });
+
+    GM_registerMenuCommand('📊 Список торрентов в VR', async function() {
+        try {
+            if (!sessionId) {
+                await getSessionId();
+            }
+
+            const torrents = await getTorrentsInFolder(TRANSMISSION_CONFIG.downloadDir);
+
+            let message = `📊 Найдено ${torrents.length} торрентов в папке VR\n\n`;
+            message += `Папка: ${TRANSMISSION_CONFIG.downloadDir}\n`;
+            message += `${'─'.repeat(50)}\n\n`;
+
+            if (torrents.length === 0) {
+                message += 'ℹ️ Нет активных торрентов в папке VR\n';
+                message += '\n💡 Проверьте, что торренты добавлены в папку:\n';
+                message += `   ${TRANSMISSION_CONFIG.downloadDir}`;
+            } else {
+                torrents.forEach((t, i) => {
+                    const date = t.addedDate ? new Date(t.addedDate * 1000).toLocaleString() : 'неизвестно';
+                    const size = t.totalSize ? (t.totalSize / 1024 / 1024 / 1024).toFixed(2) + ' Гб' : 'неизвестно';
+                    const statuses = ['Остановлен', 'Загружается', 'Скачивается', 'Сидирует'];
+                    const status = statuses[t.status] || t.status;
+                    const path = t.downloadDir || 'Нет пути';
+
+                    message += `${i+1}. ${t.name || 'Без названия'}\n`;
+                    message += `   📅 ${date}\n`;
+                    message += `   📦 ${size} | ${status}\n`;
+                    message += `   📂 ${path}\n`;
+                    message += `   🔗 ${t.hashString || 'N/A'}\n\n`;
+                });
+            }
+
+            // Создаем диалог для отображения
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: white;
+                padding: 20px 30px;
+                border-radius: 8px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+                z-index: 9999;
+                max-width: 600px;
+                max-height: 80vh;
+                overflow-y: auto;
+                font-family: monospace;
+                font-size: 12px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            `;
+
+            dialog.innerHTML = `
+                <div style="font-family: Arial, sans-serif; margin-bottom: 10px; font-size: 14px;">
+                    <strong>${message.split('\n')[0]}</strong>
+                </div>
+                <div style="font-family: monospace; font-size: 12px; line-height: 1.6;">
+                    ${message.split('\n').slice(1).join('\n')}
+                </div>
+                <br>
+                <button onclick="this.parentElement.remove()" style="padding: 5px 20px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; font-family: Arial, sans-serif;">Закрыть</button>
+            `;
+
+            document.body.appendChild(dialog);
+        } catch (error) {
+            alert(`❌ Ошибка: ${error.message}`);
+        }
+    });
+
     // Основная функция добавления кнопки
     function addUploadButton() {
         console.log('🔍 Поиск места для кнопки...');
 
-        // Проверяем, не добавлена ли уже кнопка
         if (document.getElementById('rutracker-upload-container')) {
             console.log('⚠️ Кнопка уже существует');
             return;
         }
 
-        // Ищем кнопку "Список файлов"
         const fileListBtn = document.getElementById('tor-filelist-btn');
         if (!fileListBtn) {
             console.log('⏳ Кнопка "Список файлов" не найдена');
             return;
         }
 
-        // Получаем данные раздачи
         const data = getTorrentData();
         if (!data.torrentId || !data.downloadUrl) {
             console.log('❌ Не удалось получить данные раздачи');
@@ -344,26 +601,22 @@
         console.log('  Title:', data.title);
         console.log('  URL:', data.downloadUrl);
 
-        // Находим родительский <p> с кнопкой "Список файлов"
         const fileListP = fileListBtn.closest('p');
         if (!fileListP) {
             console.log('❌ Не найден <p> с кнопкой');
             return;
         }
 
-        // Находим родительский <td>
         const parentTd = fileListP.closest('td');
         if (!parentTd) {
             console.log('❌ Не найден <td>');
             return;
         }
 
-        // Создаем контейнер для кнопки
         const buttonContainer = document.createElement('div');
         buttonContainer.id = 'rutracker-upload-container';
         buttonContainer.style.cssText = 'padding-top: 8px; text-align: center;';
 
-        // Создаем кнопку
         const uploadButton = document.createElement('input');
         uploadButton.id = 'rutracker-upload-button';
         uploadButton.type = 'button';
@@ -371,7 +624,6 @@
         uploadButton.style.cssText = 'width: 120px; cursor: pointer;';
         uploadButton.value = '📤 Отправить';
 
-        // Создаем элемент для статуса
         const statusDiv = document.createElement('div');
         statusDiv.id = 'rutracker-upload-status';
         statusDiv.style.cssText = `
@@ -391,7 +643,6 @@
         buttonContainer.appendChild(uploadButton);
         buttonContainer.appendChild(statusDiv);
 
-        // Вставляем контейнер внутрь <td> после <p>
         parentTd.insertBefore(buttonContainer, fileListP.nextSibling);
 
         console.log('✅ Кнопка добавлена внутри <td> под "Список файлов"');
@@ -425,16 +676,13 @@
         uploadButton.addEventListener('click', async function() {
             const statusDiv = document.getElementById('rutracker-upload-status');
 
-            // Показываем статус
             statusDiv.style.display = 'block';
             statusDiv.style.opacity = '1';
 
-            // Отключаем кнопку
             uploadButton.disabled = true;
             uploadButton.value = '⏳ Загрузка...';
 
             try {
-                // 1. Проверяем свободное место
                 statusDiv.innerHTML = '⏳ Проверка свободного места...';
                 statusDiv.style.color = '#333';
                 statusDiv.style.background = '#fff3cd';
@@ -449,16 +697,13 @@
                         throw new Error(`Недостаточно места! Свободно: ${freeSpaceGB.toFixed(2)} Гб, нужно минимум 5 Гб`);
                     }
 
-                    // Показываем свободное место
                     statusDiv.innerHTML = `💾 Свободно: ${freeSpaceGB.toFixed(2)} Гб`;
                     statusDiv.style.color = '#155724';
                     statusDiv.style.background = '#d4edda';
 
-                    // Небольшая пауза для отображения информации о месте
                     await new Promise(resolve => setTimeout(resolve, 800));
                 }
 
-                // 2. Скачиваем торрент
                 statusDiv.innerHTML = '⏳ Скачивание торрента...';
                 statusDiv.style.color = '#333';
                 statusDiv.style.background = '#cce5ff';
@@ -466,14 +711,12 @@
                 const blob = await downloadTorrent(data.downloadUrl);
                 console.log('✅ Торрент скачан, размер:', blob.size);
 
-                // 3. Отправляем в Transmission
                 statusDiv.innerHTML = '⏳ Отправка в Transmission...';
                 statusDiv.style.background = '#cce5ff';
 
                 const torrentName = `[pornolab.net]t${data.torrentId}.torrent`;
                 const result = await addTorrentToTransmission(blob, torrentName, data.title, data.downloadUrl);
 
-                // 4. Успех! Сразу показываем финальный статус
                 let message = '✅ Торрент успешно добавлен в Transmission!';
                 let bgColor = '#d4edda';
                 let textColor = '#155724';
@@ -506,11 +749,9 @@
                 statusDiv.style.color = '#721c24';
                 statusDiv.style.background = '#f8d7da';
             } finally {
-                // Включаем кнопку обратно
                 uploadButton.disabled = false;
                 uploadButton.value = '📤 Отправить';
 
-                // Через 5 секунд скрываем статус
                 setTimeout(() => {
                     statusDiv.style.opacity = '0';
                     setTimeout(() => {
@@ -525,12 +766,14 @@
     // Инициализация
     function init() {
         console.log('🚀 Инициализация...');
+        console.log('📌 Доступны команды в меню Tampermonkey:');
+        console.log('   🧹 Удалить 5 старых торрентов из VR');
+        console.log('   📊 Список торрентов в VR');
 
         // Удаляем старые кнопки
         const oldContainers = document.querySelectorAll('#rutracker-upload-container');
         oldContainers.forEach(el => el.remove());
 
-        // Ждем появления кнопки "Список файлов"
         let attempts = 0;
         const maxAttempts = 20;
 
