@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RuTracker.org to Torrent Upload
 // @namespace    http://tampermonkey.net/
-// @version      1.03
+// @version      1.04
 // @description  Добавляет кнопку для отправки торрент-файла на локальный сервер с загрузкой постеров
 // @author       Chuvakstepan, DeepSeek
 // @match        https://rutracker.org/forum/viewtopic.php?t=*
@@ -14,6 +14,8 @@
 // @connect      i127.fastpic.org
 // @connect      i4.imageban.ru
 // @connect      imageban.ru
+// @connect      images4.imagebam.com
+// @connect      imagebam.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -32,11 +34,9 @@
 
     // Функция для получения заголовка раздачи
     function getTorrentTitle() {
-        // 1. Пробуем получить из title
         const pageTitle = document.querySelector('title');
         if (pageTitle) {
             let title = pageTitle.textContent.trim();
-            // Убираем " :: RuTracker.org" из конца
             title = title.replace(/:: RuTracker\.org$/, '').trim();
             if (title) {
                 console.log('✅ Title из title страницы:', title);
@@ -44,7 +44,6 @@
             }
         }
 
-        // 2. Пробуем получить из h1
         const h1Title = document.querySelector('#topic-title');
         if (h1Title) {
             const title = h1Title.textContent.trim();
@@ -58,33 +57,43 @@
         return '';
     }
 
-    // Функция для получения URL постера
+    // Функция для получения URL постера (расширенная)
     function getPosterUrl() {
-        // Ищем изображение в сообщении
-        const posterImg = document.querySelector('.post_body img[src*="fastpic"], .post_body img[src*="imageban"]');
-        if (posterImg) {
-            let src = posterImg.src;
-            // Если это превью, пытаемся получить полное изображение
-            if (src.includes('/thumb/')) {
-                src = src.replace('/thumb/', '/');
-            }
-            if (src.startsWith('http')) {
-                console.log('✅ Постер найден:', src);
+        // Ищем изображения в сообщении
+        const images = document.querySelectorAll('.post_body img');
+        
+        // Список хостов для поиска
+        const posterHosts = ['fastpic', 'imageban', 'imagebam', 'postimg', 'imgur', 'images4'];
+        
+        // Сначала ищем большие изображения
+        for (const img of images) {
+            let src = img.src;
+            if (!src || !src.startsWith('http')) continue;
+            
+            // Проверяем, что это хост для изображений
+            const isPosterHost = posterHosts.some(host => src.toLowerCase().includes(host));
+            if (!isPosterHost) continue;
+            
+            // Проверяем размеры
+            const width = img.naturalWidth || img.width || 0;
+            const height = img.naturalHeight || img.height || 0;
+            
+            // Если изображение большое - это скорее всего постер
+            if (width > 200 || height > 200 || (width === 0 && height === 0)) {
+                console.log('✅ Постер найден (размер ' + width + 'x' + height + '):', src);
                 return src;
             }
         }
-
-        // Ищем любую большую картинку в посте
-        const images = document.querySelectorAll('.post_body img');
+        
+        // Если не нашли большое, берем первое подходящее
         for (const img of images) {
             let src = img.src;
-            if (src && src.startsWith('http') &&
-                (src.includes('fastpic') || src.includes('imageban') || src.includes('postImg'))) {
-                // Проверяем размеры
-                if (img.width > 200 || img.height > 200) {
-                    console.log('✅ Постер найден (большое изображение):', src);
-                    return src;
-                }
+            if (!src || !src.startsWith('http')) continue;
+            
+            const isPosterHost = posterHosts.some(host => src.toLowerCase().includes(host));
+            if (isPosterHost) {
+                console.log('✅ Постер найден (любое):', src);
+                return src;
             }
         }
 
@@ -134,11 +143,12 @@
         });
     }
 
-    // Новая функция: Загрузка постера на локальный сервер
+    // Функция: Загрузка постера на локальный сервер
     function uploadPosterToLocal(posterUrl) {
         return new Promise((resolve) => {
             console.log('🖼️ Загрузка постера на локальный сервер:', posterUrl);
 
+            // Кодируем URL правильно
             const encodedUrl = encodeURIComponent(posterUrl);
             const requestUrl = LOCAL_POSTER_SCRIPT + '?url=' + encodedUrl;
 
@@ -184,7 +194,7 @@
                     console.warn('⚠️ Таймаут соединения с локальным сервером, используем оригинальный постер');
                     resolve(posterUrl);
                 },
-                timeout: 10000 // Таймаут 10 секунд
+                timeout: 15000 // Таймаут 15 секунд
             });
         });
     }
@@ -202,13 +212,10 @@
                 formData.append('poster', posterUrl);
             }
 
-            // Выводим полную информацию о запросе
             console.log('📤 ОТПРАВКА ЗАПРОСА:');
             console.log('📤 URL:', 'http://192.168.1.133:8090/torrent/upload');
             console.log('📤 Метод: POST');
-            console.log('📤 Заголовки:');
-            console.log('  Accept: application/json');
-            console.log('📤 Параметры формы (FormData):');
+            console.log('📤 Параметры формы:');
             console.log('  file:', torrentName, `(${blob.size} байт)`);
             console.log('  save: true');
             console.log('  title:', title || '(пусто)');
@@ -224,7 +231,6 @@
                 onload: function(response) {
                     console.log('📥 ОТВЕТ СЕРВЕРА:');
                     console.log('📥 Статус:', response.status);
-                    console.log('📥 Заголовки:', response.responseHeaders);
                     console.log('📥 Тело ответа:', response.responseText);
 
                     if (response.status === 200 || response.status === 201) {
@@ -256,14 +262,12 @@
     function addUploadButton() {
         console.log('🔍 Поиск контейнера для кнопки...');
 
-        // Ищем контейнер с кнопкой скачивания торрента и magnet
         const torrentContainer = document.querySelector('td[style*="padding: 10px 6px;"]');
         if (!torrentContainer) {
             console.log('❌ Контейнер с кнопкой скачивания не найден');
             return;
         }
 
-        // Проверяем, не добавлена ли уже кнопка
         if (document.getElementById('rutracker-upload-container')) {
             console.log('⚠️ Кнопка уже существует');
             return;
@@ -285,12 +289,10 @@
             return;
         }
 
-        // Создаем контейнер для кнопки
         const buttonContainer = document.createElement('div');
         buttonContainer.id = 'rutracker-upload-container';
         buttonContainer.style.cssText = 'padding-top: 8px; text-align: center;';
 
-        // Создаем кнопку в стиле "Список файлов"
         const uploadButton = document.createElement('input');
         uploadButton.id = 'rutracker-upload-button';
         uploadButton.type = 'button';
@@ -298,7 +300,6 @@
         uploadButton.style.cssText = 'width: 120px;';
         uploadButton.value = '📤 Отправить';
 
-        // Создаем элемент для статуса
         const statusDiv = document.createElement('div');
         statusDiv.id = 'rutracker-upload-status';
         statusDiv.style.cssText = `
@@ -317,13 +318,10 @@
 
         buttonContainer.appendChild(uploadButton);
         buttonContainer.appendChild(statusDiv);
-
-        // Вставляем в контейнер
         torrentContainer.appendChild(buttonContainer);
 
         console.log('✅ Кнопка добавлена');
 
-        // Обработчик клика
         uploadButton.addEventListener('click', async function() {
             const statusDiv = document.getElementById('rutracker-upload-status');
             statusDiv.style.display = 'block';
@@ -336,14 +334,12 @@
             uploadButton.value = '⏳ Загрузка...';
 
             try {
-                // Скачиваем торрент
                 const blob = await downloadTorrentGM(downloadUrl);
                 console.log('✅ Торрент успешно скачан, размер:', blob.size);
 
                 statusDiv.innerHTML = '⏳ Обработка постера...';
                 statusDiv.style.background = '#cce5ff';
 
-                // Пытаемся загрузить постер на локальный сервер
                 let finalPosterUrl = posterUrl;
                 if (posterUrl) {
                     finalPosterUrl = await uploadPosterToLocal(posterUrl);
@@ -358,8 +354,6 @@
                 statusDiv.style.background = '#cce5ff';
 
                 const torrentName = `[rutracker.org]t${torrentId}.torrent`;
-
-                // Отправляем на сервер с локальным постером
                 const result = await uploadTorrent(blob, torrentName, torrentTitle, finalPosterUrl);
 
                 statusDiv.innerHTML = '✅ Торрент успешно отправлен!';
@@ -387,12 +381,9 @@
         });
     }
 
-    // Инициализация
     function init() {
         console.log('🚀 Инициализация скрипта для RuTracker.org...');
-        // Ждем полной загрузки страницы
         setTimeout(addUploadButton, 2000);
-        // Повторная попытка через 4 секунды
         setTimeout(addUploadButton, 4000);
     }
 
