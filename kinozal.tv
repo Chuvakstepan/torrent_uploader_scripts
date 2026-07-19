@@ -1,23 +1,75 @@
 // ==UserScript==
-// @name         Kinozal.tv to Torrent Upload
+// @name         Kinozal(.tv/.me) to Torrent Upload
 // @namespace    http://tampermonkey.net/
-// @version      1.07
+// @version      1.10
 // @description  Заменяет текст на гиперссылку для отправки торрент-файла на локальный сервер
 // @author       Chuvakstepan, DeepSeek
 // @match        https://kinozal.tv/details.php?id=*
+// @match        https://kinozal.me/details.php?id=*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
-// @connect      192.168.1.133
-// @connect      dl.kinozal.tv
-// @connect      kinozal.tv
-// @connect      i4.imageban.ru
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @connect       192.168.1.133
+// @connect       192.168.1.1
+// @connect       10.*
+// @connect       172.16.*.*
+// @connect       localhost
+// @connect       127.0.0.1
+// @connect       dl.kinozal.tv
+// @connect       dl.kinozal.me
+// @connect       kinozal.tv
+// @connect       kinozal.me
+// @connect       i4.imageban.ru
+// @connect       i127.fastpic.org
+// @connect       fastpic.org
 // @run-at       document-end
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    console.log('=== Скрипт Kinozal.tv Uploader запущен ===');
+    console.log('=== Скрипт Kinozal Uploader запущен ===');
+
+    const DEFAULT_SERVER_URL = 'http://192.168.1.133:8090';
+    const LOCAL_POSTER_SCRIPT = 'http://192.168.1.133/postimg.php';
+
+    // Определяем текущий домен
+    function getCurrentDomain() {
+        const hostname = window.location.hostname;
+        if (hostname.includes('kinozal.tv')) return 'kinozal.tv';
+        if (hostname.includes('kinozal.me')) return 'kinozal.me';
+        return hostname;
+    }
+
+    const CURRENT_DOMAIN = getCurrentDomain();
+    console.log(`🌐 Текущий домен: ${CURRENT_DOMAIN}`);
+
+    // Функции для работы с настройками
+    function getServerUrl() {
+        return GM_getValue('server_url', DEFAULT_SERVER_URL);
+    }
+
+    function setServerUrl(url) {
+        GM_setValue('server_url', url);
+        console.log('✅ Адрес сервера обновлен на:', url);
+    }
+
+    // Добавляем пункт в меню Tampermonkey
+    GM_registerMenuCommand('⚙️ Настроить адрес сервера', function() {
+        const currentUrl = getServerUrl();
+        const newUrl = prompt('Введите адрес сервера (с портом):\nПример: http://192.168.1.133:8090', currentUrl);
+        if (newUrl && newUrl.trim()) {
+            let url = newUrl.trim();
+            if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                url = 'http://' + url;
+            }
+            setServerUrl(url);
+            alert('✅ Адрес сервера обновлен на: ' + url);
+            location.reload();
+        }
+    });
 
     // Функция для получения ID раздачи из URL
     function getTorrentId() {
@@ -57,7 +109,7 @@
         const pageTitle = document.querySelector('title');
         if (pageTitle) {
             let title = pageTitle.textContent.trim();
-            title = title.replace(/:: Кинозал\.ТВ$/, '').trim();
+            title = title.replace(/:: Кинозал\.(ТВ|me)$/, '').trim();
             if (title) {
                 console.log('✅ Title из title страницы:', title);
                 return title;
@@ -75,7 +127,7 @@
             let url = ogImage.getAttribute('content');
             if (url) {
                 if (url.startsWith('/')) {
-                    url = 'https://kinozal.tv' + url;
+                    url = `https://${CURRENT_DOMAIN}` + url;
                     console.log('✅ Постер из og:image (относительный):', url);
                     return url;
                 }
@@ -91,7 +143,7 @@
             let src = menuImage.src;
             if (src) {
                 if (src.startsWith('/')) {
-                    src = 'https://kinozal.tv' + src;
+                    src = `https://${CURRENT_DOMAIN}` + src;
                     console.log('✅ Постер из меню (относительный):', src);
                     return src;
                 }
@@ -107,7 +159,7 @@
             let src = posterImg.src;
             if (src) {
                 if (src.startsWith('/')) {
-                    src = 'https://kinozal.tv' + src;
+                    src = `https://${CURRENT_DOMAIN}` + src;
                     console.log('✅ Постер найден по пути /i/poster/:', src);
                     return src;
                 }
@@ -122,9 +174,64 @@
         return '';
     }
 
+    // НОВАЯ ФУНКЦИЯ: Загрузка постера на локальный сервер
+    function uploadPosterToLocal(posterUrl) {
+        return new Promise((resolve, reject) => {
+            console.log('🖼️ Загрузка постера на локальный сервер:', posterUrl);
+
+            const encodedUrl = encodeURIComponent(posterUrl);
+            const requestUrl = LOCAL_POSTER_SCRIPT + '?url=' + encodedUrl;
+
+            console.log('🔄 Запрос к:', requestUrl);
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: requestUrl,
+                onload: function(response) {
+                    console.log('📥 Ответ от postimg.php: статус', response.status);
+                    console.log('📥 Тело ответа:', response.responseText);
+
+                    if (response.status === 200) {
+                        try {
+                            const jsonResponse = JSON.parse(response.responseText);
+                            console.log('📥 Распарсенный ответ:', jsonResponse);
+
+                            if (jsonResponse.success && jsonResponse.url) {
+                                console.log('✅ Постер загружен локально:', jsonResponse.url);
+                                resolve(jsonResponse.url);
+                            } else if (jsonResponse.error) {
+                                console.warn('⚠️ Ошибка загрузки постера:', jsonResponse.error);
+                                resolve(posterUrl);
+                            } else {
+                                console.warn('⚠️ Неизвестный ответ, используем оригинальный постер');
+                                resolve(posterUrl);
+                            }
+                        } catch (e) {
+                            console.warn('⚠️ Ошибка парсинга JSON:', e.message);
+                            console.warn('⚠️ Ответ не является JSON, используем оригинальный постер');
+                            resolve(posterUrl);
+                        }
+                    } else {
+                        console.warn('⚠️ Локальный сервер вернул статус ' + response.status + ', используем оригинальный постер');
+                        resolve(posterUrl);
+                    }
+                },
+                onerror: function(error) {
+                    console.warn('⚠️ Ошибка соединения с локальным сервером, используем оригинальный постер:', error);
+                    resolve(posterUrl);
+                },
+                ontimeout: function() {
+                    console.warn('⚠️ Таймаут соединения с локальным сервером, используем оригинальный постер');
+                    resolve(posterUrl);
+                },
+                timeout: 10000
+            });
+        });
+    }
+
     // Функция для получения URL скачивания торрента
     function getDownloadUrl() {
-        const downloadLink = document.querySelector('a[href*="dl.kinozal.tv/download.php"]');
+        const downloadLink = document.querySelector(`a[href*="dl.${CURRENT_DOMAIN}/download.php"]`);
         if (downloadLink) {
             return downloadLink.href;
         }
@@ -175,7 +282,7 @@
             }
 
             console.log('📤 ОТПРАВКА ЗАПРОСА:');
-            console.log('📤 URL:', 'http://192.168.1.133:8090/torrent/upload');
+            console.log('📤 URL:', getServerUrl() + '/torrent/upload');
             console.log('📤 Метод: POST');
             console.log('📤 Параметры формы:');
             console.log('  file:', torrentName, `(${blob.size} байт)`);
@@ -185,7 +292,7 @@
 
             GM_xmlhttpRequest({
                 method: 'POST',
-                url: 'http://192.168.1.133:8090/torrent/upload',
+                url: getServerUrl() + '/torrent/upload',
                 headers: {
                     'Accept': 'application/json'
                 },
@@ -222,16 +329,14 @@
 
     // Основная функция
     function replaceTextWithLink() {
-        console.log('🔍 Поиск td с кнопкой скачивания...');
+        console.log(`🔍 Поиск td с кнопкой скачивания на ${CURRENT_DOMAIN}...`);
 
-        // Ищем td с ссылкой на скачивание
-        const downloadTd = document.querySelector('td.nw a[href*="dl.kinozal.tv/download.php"]');
+        const downloadTd = document.querySelector(`td.nw a[href*="dl.${CURRENT_DOMAIN}/download.php"]`);
         if (!downloadTd) {
             console.log('❌ TD с кнопкой скачивания не найден');
             return;
         }
 
-        // Находим родительский td
         const parentTd = downloadTd.closest('td.nw');
         if (!parentTd) {
             console.log('❌ Родительский td не найден');
@@ -240,7 +345,6 @@
 
         console.log('✅ Найден td с кнопкой скачивания');
 
-        // Ищем следующий td (с текстом)
         const nextTd = parentTd.nextElementSibling;
         if (!nextTd || nextTd.tagName !== 'TD') {
             console.log('❌ Следующий td не найден');
@@ -270,22 +374,19 @@
             return;
         }
 
-        // Очищаем ячейку
         nextTd.innerHTML = '';
 
-        // Создаем контейнер с flex для расположения в строку
         const linkContainer = document.createElement('div');
         linkContainer.id = 'torrent-upload-link-container';
         linkContainer.style.cssText = `
-            display: flex;
-            align-items: center;
-            justify-content: flex-start;
-            gap: 10px;
-            padding: 2px 0;
-            flex-wrap: wrap;
+display: flex;
+align-items: center;
+justify-content: flex-start;
+gap: 10px;
+padding: 2px 0;
+flex-wrap: wrap;
         `;
 
-        // Создаем уменьшенную гиперссылку
         const uploadLink = document.createElement('a');
         uploadLink.id = 'torrent-upload-link';
         uploadLink.href = '#';
@@ -306,7 +407,6 @@
         `;
         uploadLink.textContent = '📤 Отправить на сервер';
 
-        // Ховер эффект
         uploadLink.onmouseover = function() {
             this.style.color = '#ff6b00';
             this.style.background = '#fff0e6';
@@ -318,7 +418,6 @@
             this.style.borderColor = '#b8d4f0';
         };
 
-        // Создаем элемент для статуса (маленький, справа)
         const statusDiv = document.createElement('div');
         statusDiv.id = 'torrent-upload-status-link';
         statusDiv.style.cssText = `
@@ -356,16 +455,33 @@
             uploadLink.onmouseout = null;
 
             try {
+                // Скачиваем торрент
                 const blob = await downloadTorrentGM(downloadUrl);
                 console.log('✅ Торрент успешно скачан, размер:', blob.size);
 
-                statusDiv.innerHTML = '⏳ Отправка...';
+                statusDiv.innerHTML = '⏳ Обработка постера...';
                 statusDiv.style.background = '#cce5ff';
                 statusDiv.style.borderColor = '#b8daff';
 
-                const torrentName = `[kinozal.tv]id${torrentId}.torrent`;
+                // Пытаемся загрузить постер на локальный сервер
+                let finalPosterUrl = posterUrl;
+                if (posterUrl) {
+                    finalPosterUrl = await uploadPosterToLocal(posterUrl);
+                    if (finalPosterUrl === posterUrl) {
+                        console.log('ℹ️ Используется оригинальный постер с внешнего сервера');
+                    } else {
+                        console.log('✅ Постер загружен локально:', finalPosterUrl);
+                    }
+                }
 
-                const result = await uploadTorrent(blob, torrentName, torrentTitle, posterUrl);
+                statusDiv.innerHTML = '⏳ Отправка торрента...';
+                statusDiv.style.background = '#cce5ff';
+                statusDiv.style.borderColor = '#b8daff';
+
+                const torrentName = `[${CURRENT_DOMAIN}]id${torrentId}.torrent`;
+
+                // Отправляем торрент с постером (локальным или оригинальным)
+                const result = await uploadTorrent(blob, torrentName, torrentTitle, finalPosterUrl);
 
                 statusDiv.innerHTML = '✅ Отправлен!';
                 statusDiv.style.background = '#d4edda';
@@ -408,7 +524,7 @@
 
     // Инициализация
     function init() {
-        console.log('🚀 Инициализация скрипта...');
+        console.log(`🚀 Инициализация скрипта для ${CURRENT_DOMAIN}...`);
         setTimeout(replaceTextWithLink, 1500);
         setTimeout(replaceTextWithLink, 3000);
     }
@@ -419,7 +535,6 @@
         init();
     }
 
-    // Наблюдатель за изменениями
     const observer = new MutationObserver(function(mutations) {
         if (!document.getElementById('torrent-upload-link-container')) {
             console.log('🔄 Ссылка не найдена, пробуем добавить...');
