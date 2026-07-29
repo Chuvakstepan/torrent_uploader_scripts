@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         RuTracker.org to Torrent Upload
 // @namespace    http://tampermonkey.net/
-// @version      1.04
+// @version      1.06
 // @description  Добавляет кнопку для отправки торрент-файла на локальный сервер с загрузкой постеров
 // @author       Chuvakstepan, DeepSeek
 // @match        https://rutracker.org/forum/viewtopic.php?t=*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @connect      192.168.1.133
+// @connect      192.168.1.133:8090
 // @connect      rutracker.org
 // @connect      static.rutracker.cc
 // @connect      fastpic.org
@@ -24,7 +25,17 @@
 
     console.log('=== Скрипт RuTracker.org Uploader запущен ===');
 
+    // ========== НАСТРОЙКИ ==========
+    // true - использовать magnet-ссылку (обходит Cloudflare)
+    // false - скачивать .torrent файл (может блокироваться Cloudflare)
+    const USE_MAGNET = true; // <-- ИЗМЕНИТЕ ЗДЕСЬ
+
+    // Адрес локального сервера
     const LOCAL_POSTER_SCRIPT = 'http://192.168.1.133/postimg.php';
+    const TORRENT_SERVER_URL = 'http://192.168.1.133:8090';
+    // ===============================
+
+    console.log(`🔧 USE_MAGNET = ${USE_MAGNET}`);
 
     // Функция для получения ID раздачи из URL
     function getTorrentId() {
@@ -61,35 +72,31 @@
     function getPosterUrl() {
         // Ищем изображения в сообщении
         const images = document.querySelectorAll('.post_body img');
-        
+
         // Список хостов для поиска
-        const posterHosts = ['fastpic', 'imageban', 'imagebam', 'postimg', 'imgur', 'images4'];
-        
+        const posterHosts = ['fastpic', 'imageban', 'imagebam', 'postimg', 'imgur', 'images4', 'radikal'];
+
         // Сначала ищем большие изображения
         for (const img of images) {
             let src = img.src;
             if (!src || !src.startsWith('http')) continue;
-            
-            // Проверяем, что это хост для изображений
+
             const isPosterHost = posterHosts.some(host => src.toLowerCase().includes(host));
             if (!isPosterHost) continue;
-            
-            // Проверяем размеры
+
             const width = img.naturalWidth || img.width || 0;
             const height = img.naturalHeight || img.height || 0;
-            
-            // Если изображение большое - это скорее всего постер
+
             if (width > 200 || height > 200 || (width === 0 && height === 0)) {
                 console.log('✅ Постер найден (размер ' + width + 'x' + height + '):', src);
                 return src;
             }
         }
-        
-        // Если не нашли большое, берем первое подходящее
+
         for (const img of images) {
             let src = img.src;
             if (!src || !src.startsWith('http')) continue;
-            
+
             const isPosterHost = posterHosts.some(host => src.toLowerCase().includes(host));
             if (isPosterHost) {
                 console.log('✅ Постер найден (любое):', src);
@@ -101,14 +108,32 @@
         return '';
     }
 
+    // Функция для получения magnet-ссылки
+    function getMagnetLink() {
+        console.log('🔍 Поиск magnet-ссылки...');
+
+        const magnetLink = document.querySelector('a.magnet-link[href^="magnet:?xt=urn:btih:"]');
+        if (magnetLink) {
+            const href = magnetLink.href;
+            console.log('✅ Magnet-ссылка найдена:', href);
+            return href;
+        }
+
+        console.log('❌ Magnet-ссылка не найдена');
+        return null;
+    }
+
     // Функция для получения URL скачивания торрента
     function getDownloadUrl() {
+        console.log('🔍 getDownloadUrl() - начало');
+
         const downloadLink = document.querySelector('a.dl-link[href*="dl.php?t="]');
         if (downloadLink) {
             const url = downloadLink.href;
             console.log('✅ Ссылка на торрент найдена:', url);
             return url;
         }
+
         console.log('❌ Ссылка на торрент не найдена');
         return null;
     }
@@ -122,6 +147,11 @@
                 method: 'GET',
                 url: url,
                 responseType: 'blob',
+                withCredentials: true,
+                headers: {
+                    'User-Agent': navigator.userAgent,
+                    'Accept': 'application/x-bittorrent, application/octet-stream, */*'
+                },
                 onload: function(response) {
                     console.log('📥 Ответ получен, статус:', response.status);
                     if (response.status === 200) {
@@ -148,7 +178,6 @@
         return new Promise((resolve) => {
             console.log('🖼️ Загрузка постера на локальный сервер:', posterUrl);
 
-            // Кодируем URL правильно
             const encodedUrl = encodeURIComponent(posterUrl);
             const requestUrl = LOCAL_POSTER_SCRIPT + '?url=' + encodedUrl;
 
@@ -178,7 +207,6 @@
                             }
                         } catch (e) {
                             console.warn('⚠️ Ошибка парсинга JSON:', e.message);
-                            console.warn('⚠️ Ответ не является JSON, используем оригинальный постер');
                             resolve(posterUrl);
                         }
                     } else {
@@ -194,12 +222,67 @@
                     console.warn('⚠️ Таймаут соединения с локальным сервером, используем оригинальный постер');
                     resolve(posterUrl);
                 },
-                timeout: 15000 // Таймаут 15 секунд
+                timeout: 15000
             });
         });
     }
 
-    // Функция для отправки торрента на сервер
+    // Функция для отправки magnet-ссылки на сервер
+    function uploadMagnet(magnetLink, title, posterUrl) {
+        return new Promise((resolve, reject) => {
+            console.log('📤 ОТПРАВКА MAGNET-ССЫЛКИ:');
+            console.log('📤 URL:', TORRENT_SERVER_URL + '/torrents');
+
+            // Формируем JSON как в примере на Python
+            const jsonData = {
+                'action': 'add',
+                'link': magnetLink,
+                'title': title || '',
+                'poster': posterUrl || '',
+                'save_to_db': true
+            };
+
+            console.log('📤 Данные:', jsonData);
+
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: TORRENT_SERVER_URL + '/torrents',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                data: JSON.stringify(jsonData),
+                onload: function(response) {
+                    console.log('📥 ОТВЕТ СЕРВЕРА:');
+                    console.log('📥 Статус:', response.status);
+                    console.log('📥 Тело ответа:', response.responseText);
+
+                    if (response.status === 200 || response.status === 201) {
+                        try {
+                            const jsonResponse = JSON.parse(response.responseText);
+                            console.log('✅ Ответ сервера (JSON):', jsonResponse);
+                            resolve(jsonResponse);
+                        } catch (e) {
+                            console.log('✅ Ответ сервера (текст):', response.responseText);
+                            resolve(response.responseText);
+                        }
+                    } else {
+                        reject(new Error(`HTTP ${response.status}: ${response.statusText}`));
+                    }
+                },
+                onerror: function(error) {
+                    console.error('❌ Ошибка отправки на сервер:', error);
+                    reject(new Error('Ошибка сети при отправке на сервер'));
+                },
+                ontimeout: function() {
+                    reject(new Error('Таймаут при отправке на сервер'));
+                },
+                timeout: 30000
+            });
+        });
+    }
+
+    // Функция для отправки торрента на сервер (старый способ)
     function uploadTorrent(blob, torrentName, title, posterUrl) {
         return new Promise((resolve, reject) => {
             const formData = new FormData();
@@ -213,7 +296,7 @@
             }
 
             console.log('📤 ОТПРАВКА ЗАПРОСА:');
-            console.log('📤 URL:', 'http://192.168.1.133:8090/torrent/upload');
+            console.log('📤 URL:', TORRENT_SERVER_URL + '/torrent/upload');
             console.log('📤 Метод: POST');
             console.log('📤 Параметры формы:');
             console.log('  file:', torrentName, `(${blob.size} байт)`);
@@ -223,7 +306,7 @@
 
             GM_xmlhttpRequest({
                 method: 'POST',
-                url: 'http://192.168.1.133:8090/torrent/upload',
+                url: TORRENT_SERVER_URL + '/torrent/upload',
                 headers: {
                     'Accept': 'application/json'
                 },
@@ -277,15 +360,28 @@
         const torrentTitle = getTorrentTitle();
         const posterUrl = getPosterUrl();
         const downloadUrl = getDownloadUrl();
+        const magnetLink = getMagnetLink();
 
         console.log('📋 Данные раздачи:');
         console.log('  ID:', torrentId);
         console.log('  Title:', torrentTitle || '(пусто)');
         console.log('  Poster URL:', posterUrl || '(пусто)');
-        console.log('  Download URL:', downloadUrl);
+        console.log('  Download URL:', downloadUrl || '(пусто)');
+        console.log('  Magnet Link:', magnetLink ? 'найдена' : 'не найдена');
 
-        if (!torrentId || !downloadUrl) {
-            console.log('❌ Не удалось получить ID раздачи или URL скачивания');
+        if (!torrentId) {
+            console.log('❌ Не удалось получить ID раздачи');
+            return;
+        }
+
+        // Проверяем наличие magnet-ссылки если включен режим magnet
+        if (USE_MAGNET && !magnetLink) {
+            console.log('❌ Magnet-ссылка не найдена, но USE_MAGNET=true');
+            return;
+        }
+
+        if (!USE_MAGNET && !downloadUrl) {
+            console.log('❌ Не удалось получить URL скачивания');
             return;
         }
 
@@ -298,7 +394,7 @@
         uploadButton.type = 'button';
         uploadButton.className = 'lite';
         uploadButton.style.cssText = 'width: 120px;';
-        uploadButton.value = '📤 Отправить';
+        uploadButton.value = USE_MAGNET ? '🧲 Отправить' : '📤 Отправить';
 
         const statusDiv = document.createElement('div');
         statusDiv.id = 'rutracker-upload-status';
@@ -320,13 +416,13 @@
         buttonContainer.appendChild(statusDiv);
         torrentContainer.appendChild(buttonContainer);
 
-        console.log('✅ Кнопка добавлена');
+        console.log(`✅ Кнопка добавлена (режим: ${USE_MAGNET ? 'MAGNET' : 'TORRENT'})`);
 
         uploadButton.addEventListener('click', async function() {
             const statusDiv = document.getElementById('rutracker-upload-status');
             statusDiv.style.display = 'block';
             statusDiv.style.opacity = '1';
-            statusDiv.innerHTML = '⏳ Скачивание торрента...';
+            statusDiv.innerHTML = '⏳ Обработка...';
             statusDiv.style.color = '#333';
             statusDiv.style.background = '#fff3cd';
 
@@ -334,33 +430,64 @@
             uploadButton.value = '⏳ Загрузка...';
 
             try {
-                const blob = await downloadTorrentGM(downloadUrl);
-                console.log('✅ Торрент успешно скачан, размер:', blob.size);
+                let result;
 
-                statusDiv.innerHTML = '⏳ Обработка постера...';
-                statusDiv.style.background = '#cce5ff';
+                if (USE_MAGNET) {
+                    // === РЕЖИМ MAGNET ===
+                    console.log('🧲 Используем magnet-ссылку');
+                    statusDiv.innerHTML = '⏳ Обработка постера...';
+                    statusDiv.style.background = '#cce5ff';
 
-                let finalPosterUrl = posterUrl;
-                if (posterUrl) {
-                    finalPosterUrl = await uploadPosterToLocal(posterUrl);
-                    if (finalPosterUrl === posterUrl) {
-                        console.log('ℹ️ Используется оригинальный постер с внешнего сервера');
-                    } else {
-                        console.log('✅ Постер загружен локально:', finalPosterUrl);
+                    let finalPosterUrl = posterUrl;
+                    if (posterUrl) {
+                        finalPosterUrl = await uploadPosterToLocal(posterUrl);
+                        if (finalPosterUrl === posterUrl) {
+                            console.log('ℹ️ Используется оригинальный постер с внешнего сервера');
+                        } else {
+                            console.log('✅ Постер загружен локально:', finalPosterUrl);
+                        }
                     }
+
+                    statusDiv.innerHTML = '⏳ Отправка magnet-ссылки на сервер...';
+                    statusDiv.style.background = '#cce5ff';
+
+                    result = await uploadMagnet(magnetLink, torrentTitle, finalPosterUrl);
+                    console.log('✅ Magnet-ссылка отправлена!', result);
+
+                } else {
+                    // === РЕЖИМ TORRENT ===
+                    console.log('📥 Скачиваем .torrent файл');
+                    statusDiv.innerHTML = '⏳ Скачивание торрента...';
+                    statusDiv.style.background = '#fff3cd';
+
+                    const blob = await downloadTorrentGM(downloadUrl);
+                    console.log('✅ Торрент успешно скачан, размер:', blob.size);
+
+                    statusDiv.innerHTML = '⏳ Обработка постера...';
+                    statusDiv.style.background = '#cce5ff';
+
+                    let finalPosterUrl = posterUrl;
+                    if (posterUrl) {
+                        finalPosterUrl = await uploadPosterToLocal(posterUrl);
+                        if (finalPosterUrl === posterUrl) {
+                            console.log('ℹ️ Используется оригинальный постер с внешнего сервера');
+                        } else {
+                            console.log('✅ Постер загружен локально:', finalPosterUrl);
+                        }
+                    }
+
+                    statusDiv.innerHTML = '⏳ Отправка на сервер...';
+                    statusDiv.style.background = '#cce5ff';
+
+                    const torrentName = `[rutracker.org]t${torrentId}.torrent`;
+                    result = await uploadTorrent(blob, torrentName, torrentTitle, finalPosterUrl);
+                    console.log('✅ Торрент отправлен!', result);
                 }
 
-                statusDiv.innerHTML = '⏳ Отправка на сервер...';
-                statusDiv.style.background = '#cce5ff';
-
-                const torrentName = `[rutracker.org]t${torrentId}.torrent`;
-                const result = await uploadTorrent(blob, torrentName, torrentTitle, finalPosterUrl);
-
-                statusDiv.innerHTML = '✅ Торрент успешно отправлен!';
+                statusDiv.innerHTML = '✅ Успешно отправлено!';
                 statusDiv.style.color = 'green';
                 statusDiv.style.background = '#d4edda';
-
-                console.log('✅ Торрент успешно отправлен!', result);
+                console.log('✅ Операция завершена успешно!', result);
 
             } catch (error) {
                 console.error('❌ Ошибка:', error);
@@ -369,7 +496,7 @@
                 statusDiv.style.background = '#f8d7da';
             } finally {
                 uploadButton.disabled = false;
-                uploadButton.value = '📤 Отправить';
+                uploadButton.value = USE_MAGNET ? '🧲 Отправить' : '📤 Отправить';
 
                 setTimeout(() => {
                     statusDiv.style.opacity = '0';
@@ -383,6 +510,14 @@
 
     function init() {
         console.log('🚀 Инициализация скрипта для RuTracker.org...');
+        console.log(`🔧 Режим: ${USE_MAGNET ? 'MAGNET (обход Cloudflare)' : 'TORRENT (скачивание .torrent)'}`);
+
+        if (USE_MAGNET) {
+            console.log('ℹ️ Будет использована magnet-ссылка для обхода Cloudflare');
+        } else {
+            console.log('ℹ️ Будет скачан .torrent файл (может блокироваться Cloudflare)');
+        }
+
         setTimeout(addUploadButton, 2000);
         setTimeout(addUploadButton, 4000);
     }
