@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kinozal(.tv/.me) to Torrent Upload
 // @namespace    http://tampermonkey.net/
-// @version      1.10
-// @description  Заменяет текст на гиперссылку для отправки торрент-файла на локальный сервер
+// @version      2.5
+// @description  Заменяет текст на гиперссылку для отправки magnet-ссылки на локальный сервер
 // @author       Chuvakstepan, DeepSeek
 // @match        https://kinozal.tv/details.php?id=*
 // @match        https://kinozal.me/details.php?id=*
@@ -12,6 +12,7 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect       192.168.1.133
+// @connect       192.168.1.133:8090
 // @connect       192.168.1.1
 // @connect       10.*
 // @connect       172.16.*.*
@@ -30,7 +31,7 @@
 (function() {
     'use strict';
 
-    console.log('=== Скрипт Kinozal Uploader запущен ===');
+    console.log('=== Скрипт Kinozal Uploader (Magnet v5) запущен ===');
 
     const DEFAULT_SERVER_URL = 'http://192.168.1.133:8090';
     const LOCAL_POSTER_SCRIPT = 'http://192.168.1.133/postimg.php';
@@ -174,9 +175,82 @@
         return '';
     }
 
-    // НОВАЯ ФУНКЦИЯ: Загрузка постера на локальный сервер
+    // НОВАЯ ФУНКЦИЯ: Получение info_hash через наблюдение за DOM
+    function getInfoHashFromDOM() {
+        return new Promise((resolve) => {
+            console.log('🔍 Поиск info_hash в DOM...');
+            
+            // Проверяем, не появился ли уже контейнер с информацией
+            const container = document.getElementById('container');
+            if (container && container.style.display !== 'none') {
+                const containerData = document.getElementById('containerdata');
+                if (containerData) {
+                    const text = containerData.textContent || containerData.innerText;
+                    const hashMatch = text.match(/Инфо хеш:\s*([A-Fa-f0-9]{40})/i);
+                    if (hashMatch && hashMatch[1]) {
+                        console.log('✅ Найден info_hash в containerdata:', hashMatch[1]);
+                        resolve(hashMatch[1].toUpperCase());
+                        return;
+                    }
+                }
+            }
+            
+            // Если не нашли, создаем MutationObserver для отслеживания изменений
+            console.log('🔄 Устанавливаем MutationObserver для отслеживания container...');
+            
+            const observer = new MutationObserver(function(mutations) {
+                for (const mutation of mutations) {
+                    if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+                        const container = document.getElementById('container');
+                        if (container && container.style.display !== 'none') {
+                            const containerData = document.getElementById('containerdata');
+                            if (containerData) {
+                                const text = containerData.textContent || containerData.innerText;
+                                const hashMatch = text.match(/Инфо хеш:\s*([A-Fa-f0-9]{40})/i);
+                                if (hashMatch && hashMatch[1]) {
+                                    console.log('✅ Найден info_hash в containerdata (через observer):', hashMatch[1]);
+                                    observer.disconnect();
+                                    resolve(hashMatch[1].toUpperCase());
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    if (mutation.type === 'childList') {
+                        const containerData = document.getElementById('containerdata');
+                        if (containerData) {
+                            const text = containerData.textContent || containerData.innerText;
+                            const hashMatch = text.match(/Инфо хеш:\s*([A-Fa-f0-9]{40})/i);
+                            if (hashMatch && hashMatch[1]) {
+                                console.log('✅ Найден info_hash в containerdata (через observer childList):', hashMatch[1]);
+                                observer.disconnect();
+                                resolve(hashMatch[1].toUpperCase());
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+            
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['style']
+            });
+            
+            // Если через 10 секунд не нашли - возвращаем null
+            setTimeout(() => {
+                observer.disconnect();
+                console.log('⚠️ Таймаут: info_hash не найден в DOM');
+                resolve(null);
+            }, 10000);
+        });
+    }
+
+    // Функция: Загрузка постера на локальный сервер
     function uploadPosterToLocal(posterUrl) {
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
             console.log('🖼️ Загрузка постера на локальный сервер:', posterUrl);
 
             const encodedUrl = encodeURIComponent(posterUrl);
@@ -208,7 +282,6 @@
                             }
                         } catch (e) {
                             console.warn('⚠️ Ошибка парсинга JSON:', e.message);
-                            console.warn('⚠️ Ответ не является JSON, используем оригинальный постер');
                             resolve(posterUrl);
                         }
                     } else {
@@ -229,74 +302,32 @@
         });
     }
 
-    // Функция для получения URL скачивания торрента
-    function getDownloadUrl() {
-        const downloadLink = document.querySelector(`a[href*="dl.${CURRENT_DOMAIN}/download.php"]`);
-        if (downloadLink) {
-            return downloadLink.href;
-        }
-        return null;
-    }
-
-    // Функция для скачивания торрента через GM_xmlhttpRequest
-    function downloadTorrentGM(url) {
+    // Функция для отправки magnet-ссылки на сервер
+    function uploadMagnet(magnetLink, title, posterUrl) {
         return new Promise((resolve, reject) => {
-            console.log('📥 Скачивание торрента с URL:', url);
-
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: url,
-                responseType: 'blob',
-                onload: function(response) {
-                    console.log('📥 Ответ получен, статус:', response.status);
-                    if (response.status === 200) {
-                        console.log('📥 Торрент скачан, размер:', response.response.size, 'байт');
-                        resolve(response.response);
-                    } else {
-                        reject(new Error(`HTTP ${response.status}: ${response.statusText}`));
-                    }
-                },
-                onerror: function(error) {
-                    console.error('❌ Ошибка при скачивании торрента:', error);
-                    reject(new Error('Ошибка сети при скачивании торрента'));
-                },
-                ontimeout: function() {
-                    reject(new Error('Таймаут при скачивании торрента'));
-                },
-                timeout: 30000
-            });
-        });
-    }
-
-    // Функция для отправки торрента на сервер
-    function uploadTorrent(blob, torrentName, title, posterUrl) {
-        return new Promise((resolve, reject) => {
-            const formData = new FormData();
-            formData.append('file', blob, torrentName);
-            formData.append('save', 'true');
-            if (title) {
-                formData.append('title', title);
-            }
-            if (posterUrl) {
-                formData.append('poster', posterUrl);
-            }
-
-            console.log('📤 ОТПРАВКА ЗАПРОСА:');
-            console.log('📤 URL:', getServerUrl() + '/torrent/upload');
-            console.log('📤 Метод: POST');
-            console.log('📤 Параметры формы:');
-            console.log('  file:', torrentName, `(${blob.size} байт)`);
-            console.log('  save: true');
-            console.log('  title:', title || '(пусто)');
-            console.log('  poster:', posterUrl || '(пусто)');
+            const serverUrl = getServerUrl();
+            
+            console.log('📤 ОТПРАВКА MAGNET-ССЫЛКИ:');
+            console.log('📤 URL:', serverUrl + '/torrents');
+            
+            const jsonData = {
+                'action': 'add',
+                'link': magnetLink,
+                'title': title || '',
+                'poster': posterUrl || '',
+                'save_to_db': true
+            };
+            
+            console.log('📤 Данные:', jsonData);
 
             GM_xmlhttpRequest({
                 method: 'POST',
-                url: getServerUrl() + '/torrent/upload',
+                url: serverUrl + '/torrents',
                 headers: {
+                    'Content-Type': 'application/json',
                     'Accept': 'application/json'
                 },
-                data: formData,
+                data: JSON.stringify(jsonData),
                 onload: function(response) {
                     console.log('📥 ОТВЕТ СЕРВЕРА:');
                     console.log('📥 Статус:', response.status);
@@ -361,16 +392,14 @@
         const torrentId = getTorrentId();
         const torrentTitle = getTorrentTitle();
         const posterUrl = getPosterUrl();
-        const downloadUrl = getDownloadUrl();
 
         console.log('📋 Данные раздачи:');
         console.log('  ID:', torrentId);
         console.log('  Title:', torrentTitle || '(пусто)');
         console.log('  Poster URL:', posterUrl || '(пусто)');
-        console.log('  Download URL:', downloadUrl);
 
-        if (!torrentId || !downloadUrl) {
-            console.log('❌ Не удалось получить ID раздачи или URL скачивания');
+        if (!torrentId) {
+            console.log('❌ Не удалось получить ID раздачи');
             return;
         }
 
@@ -405,7 +434,7 @@ flex-wrap: wrap;
             white-space: nowrap;
             line-height: 20px;
         `;
-        uploadLink.textContent = '📤 Отправить на сервер';
+        uploadLink.textContent = '🧲 Отправить magnet';
 
         uploadLink.onmouseover = function() {
             this.style.color = '#ff6b00';
@@ -437,7 +466,7 @@ flex-wrap: wrap;
         linkContainer.appendChild(statusDiv);
         nextTd.appendChild(linkContainer);
 
-        console.log('✅ Текст заменен на гиперссылку');
+        console.log('✅ Текст заменен на гиперссылку (magnet режим)');
 
         // Обработчик клика
         uploadLink.addEventListener('click', async function(e) {
@@ -445,7 +474,7 @@ flex-wrap: wrap;
 
             const statusDiv = document.getElementById('torrent-upload-status-link');
             statusDiv.style.display = 'inline-block';
-            statusDiv.innerHTML = '⏳ Скачивание...';
+            statusDiv.innerHTML = '⏳ Получение info_hash...';
             statusDiv.style.background = '#fff3cd';
             statusDiv.style.borderColor = '#ffc107';
 
@@ -455,15 +484,50 @@ flex-wrap: wrap;
             uploadLink.onmouseout = null;
 
             try {
-                // Скачиваем торрент
-                const blob = await downloadTorrentGM(downloadUrl);
-                console.log('✅ Торрент успешно скачан, размер:', blob.size);
+                let infoHash = null;
+                
+                // Находим кнопку "Список файлов"
+                const fileListBtn = document.querySelector('a[onclick*="get_torm"][onclick*=",2,"]') || 
+                                   Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('Список файлов'));
+                
+                if (fileListBtn) {
+                    console.log('✅ Найдена кнопка "Список файлов", эмулируем клик...');
+                    
+                    // Кликаем и ждем появления info_hash
+                    const infoHashPromise = getInfoHashFromDOM();
+                    fileListBtn.click();
+                    
+                    infoHash = await infoHashPromise;
+                } else {
+                    console.log('❌ Кнопка "Список файлов" не найдена');
+                }
+                
+                if (!infoHash) {
+                    // Если не получили через DOM, пробуем найти на странице в любом виде
+                    console.log('🔄 Поиск info_hash на странице...');
+                    const bodyText = document.body.innerText;
+                    const hashMatch = bodyText.match(/([A-Fa-f0-9]{40})/);
+                    if (hashMatch && hashMatch[1]) {
+                        infoHash = hashMatch[1].toUpperCase();
+                        console.log('✅ Найден info_hash в тексте страницы:', infoHash);
+                    }
+                }
+                
+                if (!infoHash) {
+                    throw new Error('Не удалось получить info_hash. Попробуйте обновить страницу.');
+                }
+                
+                console.log('✅ Info_hash получен:', infoHash);
+                
+                // Формируем magnet-ссылку
+                const title = encodeURIComponent(torrentTitle || '');
+                const magnetLink = `magnet:?xt=urn:btih:${infoHash}&tr=http://bt2.t-ru.org/ann?magnet&dn=${title}`;
+                console.log('✅ Magnet-ссылка сформирована:', magnetLink);
 
                 statusDiv.innerHTML = '⏳ Обработка постера...';
                 statusDiv.style.background = '#cce5ff';
                 statusDiv.style.borderColor = '#b8daff';
 
-                // Пытаемся загрузить постер на локальный сервер
                 let finalPosterUrl = posterUrl;
                 if (posterUrl) {
                     finalPosterUrl = await uploadPosterToLocal(posterUrl);
@@ -474,31 +538,28 @@ flex-wrap: wrap;
                     }
                 }
 
-                statusDiv.innerHTML = '⏳ Отправка торрента...';
+                statusDiv.innerHTML = '⏳ Отправка на сервер...';
                 statusDiv.style.background = '#cce5ff';
                 statusDiv.style.borderColor = '#b8daff';
 
-                const torrentName = `[${CURRENT_DOMAIN}]id${torrentId}.torrent`;
-
-                // Отправляем торрент с постером (локальным или оригинальным)
-                const result = await uploadTorrent(blob, torrentName, torrentTitle, finalPosterUrl);
+                const result = await uploadMagnet(magnetLink, torrentTitle, finalPosterUrl);
 
                 statusDiv.innerHTML = '✅ Отправлен!';
                 statusDiv.style.background = '#d4edda';
                 statusDiv.style.borderColor = '#c3e6cb';
                 statusDiv.style.color = 'green';
 
-                console.log('✅ Торрент успешно отправлен!', result);
+                console.log('✅ Magnet-ссылка успешно отправлена!', result);
 
             } catch (error) {
                 console.error('❌ Ошибка:', error);
-                statusDiv.innerHTML = '❌ Ошибка';
+                statusDiv.innerHTML = '❌ ' + error.message;
                 statusDiv.style.background = '#f8d7da';
                 statusDiv.style.borderColor = '#f5c6cb';
                 statusDiv.style.color = 'red';
                 statusDiv.title = error.message || 'Неизвестная ошибка';
             } finally {
-                uploadLink.textContent = '📤 Отправить на сервер';
+                uploadLink.textContent = '🧲 Отправить magnet';
                 uploadLink.style.cursor = 'pointer';
                 uploadLink.onmouseover = function() {
                     this.style.color = '#ff6b00';
@@ -524,7 +585,7 @@ flex-wrap: wrap;
 
     // Инициализация
     function init() {
-        console.log(`🚀 Инициализация скрипта для ${CURRENT_DOMAIN}...`);
+        console.log(`🚀 Инициализация скрипта для ${CURRENT_DOMAIN} (MAGNET режим v5)...`);
         setTimeout(replaceTextWithLink, 1500);
         setTimeout(replaceTextWithLink, 3000);
     }
