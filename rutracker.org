@@ -1,15 +1,17 @@
 // ==UserScript==
 // @name         RuTracker.org to Torrent Upload
 // @namespace    http://tampermonkey.net/
-// @version      1.06
+// @version      1.07
 // @description  Добавляет кнопку для отправки торрент-файла на локальный сервер с загрузкой постеров
 // @author       Chuvakstepan, DeepSeek
 // @match        https://rutracker.org/forum/viewtopic.php?t=*
+// @match        https://rutracker.net/forum/viewtopic.php?t=*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @connect      192.168.1.133
 // @connect      192.168.1.133:8090
 // @connect      rutracker.org
+// @connect      rutracker.net
 // @connect      static.rutracker.cc
 // @connect      fastpic.org
 // @connect      i127.fastpic.org
